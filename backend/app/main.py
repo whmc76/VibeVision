@@ -1,13 +1,15 @@
-from fastapi import FastAPI
-from fastapi import Request
-from fastapi.responses import JSONResponse
+import asyncio
+
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from app.core.config import get_settings
 from app.db.session import SessionLocal, create_db_and_tables
 from app.routers import admin, telegram
 from app.seed import seed_defaults
 from app.services.error_details import format_exception_details
+from app.services.task_recovery import recover_unfinished_tasks
 
 settings = get_settings()
 
@@ -26,10 +28,11 @@ app.include_router(telegram.router, prefix="/api")
 
 
 @app.on_event("startup")
-def on_startup() -> None:
+async def on_startup() -> None:
     create_db_and_tables()
     with SessionLocal() as db:
-        seed_defaults(db, include_demo=settings.environment == "development")
+        seed_defaults(db)
+    asyncio.create_task(recover_unfinished_tasks(settings))
 
 
 @app.get("/api/health")

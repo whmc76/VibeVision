@@ -18,6 +18,12 @@ export interface User {
   is_admin: boolean;
   is_hidden: boolean;
   credit_balance: number;
+  daily_bonus_balance: number;
+  daily_bonus_allowance: number;
+  daily_bonus_granted_on: string | null;
+  subscription_plan: string | null;
+  subscription_expires_at: string | null;
+  total_recharge_usd_cents: number;
   total_spent_credits: number;
   created_at: string;
   updated_at: string;
@@ -38,6 +44,8 @@ export interface GenerationTask {
   external_job_id: string | null;
   telegram_chat_id: string | null;
   telegram_message_id: string | null;
+  bonus_credit_cost: number;
+  paid_credit_cost: number;
   created_at: string;
   updated_at: string;
 }

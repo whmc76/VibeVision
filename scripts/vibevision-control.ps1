@@ -1,12 +1,14 @@
 param(
   [string]$ConfigPath = (Join-Path $PSScriptRoot "..\config\vibevision.env"),
   [string]$LocalConfigPath = (Join-Path $PSScriptRoot "..\config\vibevision.local.env"),
-  [switch]$NoAutoStart
+  [switch]$NoAutoStart,
+  [switch]$StatusSnapshot
 )
 
 $ErrorActionPreference = "Stop"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $LogPath = Join-Path $env:TEMP "vibevision-control.log"
+$ScriptPath = if ($PSCommandPath) { $PSCommandPath } else { $MyInvocation.MyCommand.Path }
 
 function Import-VibeVisionConfig {
   param([string]$Path)
@@ -59,6 +61,117 @@ function Get-EnvText {
   return $DefaultValue
 }
 
+function Get-OllamaModelDisplay {
+  $LegacyModel = Get-EnvText -Name "OLLAMA_MODEL" -DefaultValue ""
+  $LogicModel = Get-EnvText -Name "OLLAMA_LOGIC_MODEL" -DefaultValue ""
+  $PromptModel = Get-EnvText -Name "OLLAMA_PROMPT_MODEL" -DefaultValue ""
+
+  if (-not $LogicModel) {
+    if ($LegacyModel) {
+      $LogicModel = $LegacyModel
+    } elseif ($PromptModel) {
+      $LogicModel = $PromptModel
+    }
+  }
+
+  if (-not $PromptModel) {
+    if ($LegacyModel) {
+      $PromptModel = $LegacyModel
+    } elseif ($LogicModel) {
+      $PromptModel = $LogicModel
+    }
+  }
+
+  if ($LogicModel -and $LogicModel -eq $PromptModel) {
+    return "$LogicModel (logic + prompt)"
+  }
+
+  $Parts = @()
+  if ($LogicModel) {
+    $Parts += "logic=$LogicModel"
+  }
+  if ($PromptModel) {
+    $Parts += "prompt=$PromptModel"
+  }
+
+  if ($Parts.Count -eq 0) {
+    return "Models are not configured"
+  }
+  return ($Parts -join ", ")
+}
+
+function Get-TelegramWebhookStatus {
+  $Poller = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and $_.CommandLine -like "*app.services.telegram_poller*" } |
+    Select-Object -First 1
+
+  if (-not $env:TELEGRAM_BOT_TOKEN) {
+    return [pscustomobject]@{
+      Status = "unconfigured"
+      Url = $null
+      Detail = "Set TELEGRAM_BOT_TOKEN in local config"
+      Pid = $null
+    }
+  }
+
+  try {
+    $Uri = "https://api.telegram.org/bot$($env:TELEGRAM_BOT_TOKEN)/getWebhookInfo"
+    $Response = Invoke-RestMethod -Uri $Uri -Method Post
+    if (-not $Response.ok) {
+      throw "Telegram API returned ok=false."
+    }
+  } catch {
+    return [pscustomobject]@{
+      Status = "offline"
+      Url = $null
+      Detail = "Telegram webhook check failed: $($_.Exception.Message)"
+      Pid = if ($Poller) { [int]$Poller.ProcessId } else { $null }
+    }
+  }
+
+  $Info = $Response.result
+  $WebhookUrl = if ($Info.url) { [string]$Info.url } else { $null }
+  $PendingCount = if ($null -ne $Info.pending_update_count) { [int]$Info.pending_update_count } else { 0 }
+  $LastError = if ($Info.last_error_message) { [string]$Info.last_error_message } else { $null }
+
+  if (-not $WebhookUrl) {
+    if ($Poller) {
+      return [pscustomobject]@{
+        Status = "configured"
+        Url = "local getUpdates polling"
+        Detail = "Local Telegram poller is running."
+        Pid = [int]$Poller.ProcessId
+      }
+    }
+
+    $Detail = "Bot token is configured, but no webhook URL is registered."
+    if ($PendingCount -gt 0) {
+      $Detail += " Pending updates: $PendingCount."
+    }
+    return [pscustomobject]@{
+      Status = "unconfigured"
+      Url = $null
+      Detail = $Detail
+      Pid = $null
+    }
+  }
+
+  $Detail = "Webhook registered."
+  if ($PendingCount -gt 0) {
+    $Detail += " Pending updates: $PendingCount."
+  }
+  if ($LastError) {
+    $Detail += " Last error: $LastError"
+  }
+
+  return [pscustomobject]@{
+    Status = if ($LastError) { "offline" } else { "configured" }
+    Url = $WebhookUrl
+    Detail = $Detail
+    Pid = if ($Poller) { [int]$Poller.ProcessId } else { $null }
+  }
+}
+
 function Get-ListenerPid {
   param([int]$Port)
 
@@ -74,14 +187,84 @@ function Get-ListenerPid {
   return $Connection.OwningProcess
 }
 
-function Get-ProcessLabel {
-  param([object]$Pid)
+function Get-ListenerPidMap {
+  param([int[]]$Ports)
 
-  if (-not $Pid) {
+  $Map = @{}
+  $ValidPorts = @($Ports | Where-Object { $_ -gt 0 } | Sort-Object -Unique)
+  if ($ValidPorts.Count -eq 0) {
+    return $Map
+  }
+
+  $PortSet = @{}
+  foreach ($Port in $ValidPorts) {
+    $PortSet[[int]$Port] = $true
+  }
+
+  $Lines = & netstat.exe -ano -p TCP 2>$null
+  foreach ($Line in $Lines) {
+    if ($Line -notmatch "LISTENING") {
+      continue
+    }
+
+    if ($Line -match "^\s*TCP\s+\S+:(\d+)\s+\S+\s+LISTENING\s+(\d+)\s*$") {
+      $Port = [int]$Matches[1]
+      if ($PortSet.ContainsKey($Port) -and -not $Map.ContainsKey($Port)) {
+        $Map[$Port] = [int]$Matches[2]
+      }
+    }
+  }
+
+  return $Map
+}
+
+function Get-ProcessLabelMap {
+  param([object[]]$Pids)
+
+  $Map = @{}
+  $ValidPids = @(
+    $Pids |
+      Where-Object { $_ } |
+      ForEach-Object { [int]$_ } |
+      Sort-Object -Unique
+  )
+  if ($ValidPids.Count -eq 0) {
+    return $Map
+  }
+
+  foreach ($Process in (Get-Process -Id $ValidPids -ErrorAction SilentlyContinue)) {
+    $Map[[int]$Process.Id] = "$($Process.ProcessName) is listening"
+  }
+
+  return $Map
+}
+
+function Get-ProcessLabelFromMap {
+  param(
+    [object]$ProcessIdValue,
+    [hashtable]$ProcessLabelMap
+  )
+
+  if (-not $ProcessIdValue) {
     return "Not listening"
   }
 
-  $Process = Get-Process -Id $Pid -ErrorAction SilentlyContinue
+  $ProcessId = [int]$ProcessIdValue
+  if ($ProcessLabelMap.ContainsKey($ProcessId)) {
+    return $ProcessLabelMap[$ProcessId]
+  }
+
+  return "Listening"
+}
+
+function Get-ProcessLabel {
+  param([object]$ProcessIdValue)
+
+  if (-not $ProcessIdValue) {
+    return "Not listening"
+  }
+
+  $Process = Get-Process -Id $ProcessIdValue -ErrorAction SilentlyContinue
   if (-not $Process) {
     return "Listening"
   }
@@ -93,14 +276,14 @@ function New-ServiceRow {
     [string]$Name,
     [string]$Status,
     [object]$Port,
-    [object]$Pid,
+    [object]$ProcessIdValue,
     [string]$Url,
     [string]$Detail
   )
 
   $PidText = "-"
-  if ($Pid) {
-    $PidText = [string]$Pid
+  if ($ProcessIdValue) {
+    $PidText = [string]$ProcessIdValue
   }
 
   [pscustomobject]@{
@@ -129,25 +312,30 @@ function Get-ServiceRows {
   $ComfyUrl = "http://$($ComfyHost):$ComfyPort"
   $OllamaUrl = "http://$($OllamaHost):$OllamaPort"
 
-  $ApiPid = Get-ListenerPid -Port $ApiPort
-  $FrontendPid = Get-ListenerPid -Port $FrontendPort
-  $ComfyPid = Get-ListenerPid -Port $ComfyPort
-  $OllamaPid = Get-ListenerPid -Port $OllamaPort
+  $PidMap = Get-ListenerPidMap -Ports @($ApiPort, $FrontendPort, $ComfyPort, $OllamaPort)
+  $ApiPid = if ($PidMap.ContainsKey($ApiPort)) { $PidMap[$ApiPort] } else { $null }
+  $FrontendPid = if ($PidMap.ContainsKey($FrontendPort)) { $PidMap[$FrontendPort] } else { $null }
+  $ComfyPid = if ($PidMap.ContainsKey($ComfyPort)) { $PidMap[$ComfyPort] } else { $null }
+  $OllamaPid = if ($PidMap.ContainsKey($OllamaPort)) { $PidMap[$OllamaPort] } else { $null }
+  $ProcessLabelMap = Get-ProcessLabelMap -Pids @($ApiPid, $FrontendPid, $ComfyPid, $OllamaPid)
 
-  $TelegramStatus = "unconfigured"
-  $TelegramDetail = "Set TELEGRAM_BOT_TOKEN in local config"
-  if ($env:TELEGRAM_BOT_TOKEN) {
-    $TelegramStatus = "configured"
-    $TelegramDetail = "Webhook endpoint is served by the API"
-  }
+  $Telegram = Get-TelegramWebhookStatus
 
   @(
-    New-ServiceRow -Name "API" -Status $(if ($ApiPid) { "online" } else { "offline" }) -Port $ApiPort -Pid $ApiPid -Url $ApiUrl -Detail (Get-ProcessLabel -Pid $ApiPid)
-    New-ServiceRow -Name "Frontend" -Status $(if ($FrontendPid) { "online" } else { "offline" }) -Port $FrontendPort -Pid $FrontendPid -Url $FrontendUrl -Detail (Get-ProcessLabel -Pid $FrontendPid)
-    New-ServiceRow -Name "ComfyUI" -Status $(if ($ComfyPid) { "online" } else { "offline" }) -Port $ComfyPort -Pid $ComfyPid -Url $ComfyUrl -Detail (Get-EnvText -Name "COMFYUI_ROOT" -DefaultValue "COMFYUI_ROOT is not configured")
-    New-ServiceRow -Name "Ollama" -Status $(if ($OllamaPid) { "online" } else { "offline" }) -Port $OllamaPort -Pid $OllamaPid -Url $OllamaUrl -Detail (Get-EnvText -Name "OLLAMA_MODEL" -DefaultValue "Model is not configured")
-    New-ServiceRow -Name "Telegram" -Status $TelegramStatus -Port $ApiPort -Pid $ApiPid -Url "$ApiUrl/api/telegram/webhook" -Detail $TelegramDetail
+    New-ServiceRow -Name "API" -Status $(if ($ApiPid) { "online" } else { "offline" }) -Port $ApiPort -ProcessIdValue $ApiPid -Url $ApiUrl -Detail (Get-ProcessLabelFromMap -ProcessIdValue $ApiPid -ProcessLabelMap $ProcessLabelMap)
+    New-ServiceRow -Name "Frontend" -Status $(if ($FrontendPid) { "online" } else { "offline" }) -Port $FrontendPort -ProcessIdValue $FrontendPid -Url $FrontendUrl -Detail (Get-ProcessLabelFromMap -ProcessIdValue $FrontendPid -ProcessLabelMap $ProcessLabelMap)
+    New-ServiceRow -Name "ComfyUI" -Status $(if ($ComfyPid) { "online" } else { "offline" }) -Port $ComfyPort -ProcessIdValue $ComfyPid -Url $ComfyUrl -Detail (Get-EnvText -Name "COMFYUI_ROOT" -DefaultValue "COMFYUI_ROOT is not configured")
+    New-ServiceRow -Name "Ollama" -Status $(if ($OllamaPid) { "online" } else { "offline" }) -Port $OllamaPort -ProcessIdValue $OllamaPid -Url $OllamaUrl -Detail (Get-OllamaModelDisplay)
+    New-ServiceRow -Name "Telegram" -Status $Telegram.Status -Port $ApiPort -ProcessIdValue $(if ($Telegram.Pid) { $Telegram.Pid } else { $ApiPid }) -Url $Telegram.Url -Detail $Telegram.Detail
   )
+}
+
+Import-VibeVisionConfig -Path $ConfigPath
+Import-VibeVisionConfig -Path $LocalConfigPath
+
+if ($StatusSnapshot) {
+  Get-ServiceRows | ConvertTo-Json -Compress
+  return
 }
 
 function Invoke-ControlScript {
@@ -184,9 +372,6 @@ function Invoke-ControlScript {
     ErrorOffset = 0
   }
 }
-
-Import-VibeVisionConfig -Path $ConfigPath
-Import-VibeVisionConfig -Path $LocalConfigPath
 
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -312,15 +497,72 @@ $ButtonPanel.Controls.Add($OpenButton)
 $ButtonPanel.Controls.Add($ExitButton)
 
 $RunningOperations = New-Object System.Collections.ArrayList
+$script:RefreshOperation = $null
+$script:LastRefreshStarted = [datetime]::MinValue
+$RefreshInterval = [timespan]::FromSeconds(7)
 
 function Add-LogLine {
   param([string]$Message)
 
   $Line = "[{0}] {1}" -f (Get-Date -Format "yyyy-MM-dd HH:mm:ss"), $Message
+  if ($LogBox.TextLength -gt 60000) {
+    $LogBox.Text = $LogBox.Text.Substring($LogBox.TextLength - 40000)
+    $LogBox.SelectionStart = $LogBox.TextLength
+  }
   [void]$LogBox.AppendText($Line + [Environment]::NewLine)
   try {
     Add-Content -LiteralPath $LogPath -Value $Line -ErrorAction SilentlyContinue
   } catch {
+  }
+}
+
+function Get-TextFileSafe {
+  param([string]$Path)
+
+  if (-not $Path -or -not (Test-Path -LiteralPath $Path)) {
+    return ""
+  }
+
+  $Content = Get-Content -LiteralPath $Path -Raw -ErrorAction SilentlyContinue
+  if ($null -eq $Content) {
+    return ""
+  }
+
+  return [string]$Content
+}
+
+function Get-ProcessExitCodeSafe {
+  param(
+    [System.Diagnostics.Process]$Process,
+    [int]$WaitMilliseconds = 250
+  )
+
+  if (-not $Process) {
+    return $null
+  }
+
+  try {
+    [void]$Process.WaitForExit($WaitMilliseconds)
+  } catch {
+  }
+
+  try {
+    $Process.Refresh()
+  } catch {
+  }
+
+  try {
+    if (-not $Process.HasExited) {
+      return $null
+    }
+  } catch {
+    return $null
+  }
+
+  try {
+    return [int]$Process.ExitCode
+  } catch {
+    return $null
   }
 }
 
@@ -334,9 +576,11 @@ function Set-OperationButtons {
   $ExitButton.Enabled = $true
 }
 
-function Refresh-Grid {
+function Set-GridRows {
+  param([object[]]$Rows)
+
+  $Grid.SuspendLayout()
   try {
-    $Rows = Get-ServiceRows
     $Grid.DataSource = [System.Collections.ArrayList]$Rows
     if ($Grid.Columns["Service"]) {
       $Grid.Columns["Service"].FillWeight = 70
@@ -357,10 +601,120 @@ function Refresh-Grid {
       $Grid.Columns["Detail"].FillWeight = 190
     }
     $StatusLabel.Text = "Last refresh: $(Get-Date -Format 'HH:mm:ss')"
+  } finally {
+    $Grid.ResumeLayout()
+  }
+}
+
+function Start-StatusRefresh {
+  param(
+    [string]$Reason = "auto",
+    [switch]$Force
+  )
+
+  if ($script:RefreshOperation -and -not $script:RefreshOperation.Process.HasExited) {
+    return
+  }
+
+  $Now = Get-Date
+  if (-not $Force -and (($Now - $script:LastRefreshStarted) -lt $RefreshInterval)) {
+    return
+  }
+
+  $script:LastRefreshStarted = $Now
+  $OutputPath = Join-Path $env:TEMP ("vibevision-status-{0}.json" -f ([guid]::NewGuid().ToString("N")))
+  $ErrorPath = Join-Path $env:TEMP ("vibevision-status-{0}.err.log" -f ([guid]::NewGuid().ToString("N")))
+  $Arguments = @(
+    "-NoProfile",
+    "-ExecutionPolicy",
+    "Bypass",
+    "-File",
+    $ScriptPath,
+    "-ConfigPath",
+    $ConfigPath,
+    "-LocalConfigPath",
+    $LocalConfigPath,
+    "-StatusSnapshot"
+  )
+
+  try {
+    $Process = Start-Process `
+      -FilePath "powershell" `
+      -ArgumentList $Arguments `
+      -WindowStyle Hidden `
+      -RedirectStandardOutput $OutputPath `
+      -RedirectStandardError $ErrorPath `
+      -PassThru
+
+    $script:RefreshOperation = [pscustomobject]@{
+      Process = $Process
+      OutputPath = $OutputPath
+      ErrorPath = $ErrorPath
+      Reason = $Reason
+    }
+    $StatusLabel.Text = "Refreshing status..."
+  } catch {
+    $script:RefreshOperation = $null
+    $StatusLabel.Text = "Refresh start failed."
+    Add-LogLine "Refresh start failed: $($_.Exception.Message)"
+  }
+}
+
+function Complete-StatusRefresh {
+  if (-not $script:RefreshOperation) {
+    return
+  }
+
+  if (-not $script:RefreshOperation.Process.HasExited) {
+    return
+  }
+
+  $Operation = $script:RefreshOperation
+  $script:RefreshOperation = $null
+
+  try {
+    $Json = Get-TextFileSafe -Path $Operation.OutputPath
+    $ErrorText = (Get-TextFileSafe -Path $Operation.ErrorPath).Trim()
+    $ExitCode = Get-ProcessExitCodeSafe -Process $Operation.Process
+
+    if ($null -ne $ExitCode -and $ExitCode -ne 0) {
+      if (-not $ErrorText) {
+        $OutputText = $Json.Trim()
+        if ($OutputText) {
+          $ErrorText = $OutputText
+        } else {
+          $ErrorText = "status process exited with code $ExitCode"
+        }
+      }
+      throw $ErrorText
+    }
+
+    if (-not $Json.Trim()) {
+      if ($ErrorText) {
+        throw $ErrorText
+      }
+      throw "status process returned no data."
+    }
+
+    $ParsedRows = $Json | ConvertFrom-Json -ErrorAction Stop
+    if ($null -eq $ParsedRows) {
+      $Rows = @()
+    } elseif ($ParsedRows -is [System.Array]) {
+      $Rows = $ParsedRows
+    } else {
+      $Rows = @($ParsedRows)
+    }
+    Set-GridRows -Rows $Rows
   } catch {
     $StatusLabel.Text = "Refresh failed."
     Add-LogLine "Refresh failed: $($_.Exception.Message)"
+  } finally {
+    Remove-Item -LiteralPath $Operation.OutputPath, $Operation.ErrorPath -ErrorAction SilentlyContinue
   }
+}
+
+function Refresh-Grid {
+  Start-StatusRefresh -Reason "manual" -Force
 }
 
 function Start-ControlOperation {
@@ -429,8 +783,9 @@ function Update-Operations {
     Read-OperationOutput -Operation $Operation
     if ($Operation.Process.HasExited) {
       Read-OperationOutput -Operation $Operation
-      $ExitCode = $Operation.Process.ExitCode
-      Add-LogLine "$($Operation.Name) exited with code $ExitCode."
+      $ExitCode = Get-ProcessExitCodeSafe -Process $Operation.Process
+      $ExitText = if ($null -ne $ExitCode) { [string]$ExitCode } else { "unknown" }
+      Add-LogLine "$($Operation.Name) exited with code $ExitText."
       [void]$Completed.Add($Operation)
     }
   }
@@ -441,7 +796,7 @@ function Update-Operations {
 
   if ($RunningOperations.Count -eq 0) {
     Set-OperationButtons -Enabled $true
-    Refresh-Grid
+    Start-StatusRefresh -Reason "operation complete" -Force
   }
 }
 
@@ -469,10 +824,11 @@ $ExitButton.Add_Click({
 })
 
 $Timer = New-Object System.Windows.Forms.Timer
-$Timer.Interval = 2000
+$Timer.Interval = 1000
 $Timer.Add_Tick({
   Update-Operations
-  Refresh-Grid
+  Complete-StatusRefresh
+  Start-StatusRefresh -Reason "auto"
 })
 $Timer.Start()
 
@@ -486,16 +842,10 @@ $Form.Add_Shown({
 
 $Form.Add_FormClosing({
   if ($StopOnExit.Checked) {
-    Add-LogLine "Exit requested; stopping background services."
+    Add-LogLine "Exit requested; launching background stop."
     try {
-      $Operation = Invoke-ControlScript -ScriptName "stop-all.ps1"
-      $Exited = $Operation.Process.WaitForExit(15000)
-      Read-OperationOutput -Operation $Operation
-      if ($Exited) {
-        Add-LogLine "stop-all.ps1 exited with code $($Operation.Process.ExitCode)."
-      } else {
-        Add-LogLine "stop-all.ps1 is still running after 15 seconds; closing the monitor."
-      }
+      [void](Invoke-ControlScript -ScriptName "stop-all.ps1")
+      Add-LogLine "stop-all.ps1 launched in the background."
     } catch {
       Add-LogLine "Stop on exit failed: $($_.Exception.Message)"
     }

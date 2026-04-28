@@ -1,5 +1,6 @@
 import asyncio
 import copy
+import random
 from typing import Any
 from urllib.parse import urlencode
 from uuid import uuid4
@@ -19,13 +20,14 @@ class ComfyUIClient:
         workflow: Workflow,
         prompt: str,
         source_media_url: str | None,
+        parameters: dict[str, Any] | None = None,
     ) -> str:
         async with httpx.AsyncClient(base_url=self.settings.comfyui_base_url, timeout=30) as client:
             source_image_name = None
-            if source_media_url:
+            if source_media_url and self._template_requires_source_image(workflow.template or {}):
                 source_image_name = await self._upload_source_image(client, source_media_url)
 
-            payload = self._build_payload(workflow, prompt, source_image_name)
+            payload = self._build_payload(workflow, prompt, source_image_name, parameters or {})
             response = await client.post("/prompt", json=payload)
             response.raise_for_status()
             data = response.json()
@@ -36,6 +38,7 @@ class ComfyUIClient:
         workflow: Workflow,
         prompt: str,
         source_image_name: str | None,
+        parameters: dict[str, Any],
     ) -> dict[str, Any]:
         template = workflow.template or {}
         if template.get("prompt"):
@@ -43,20 +46,22 @@ class ComfyUIClient:
                 copy.deepcopy(template["prompt"]),
                 prompt=prompt,
                 source_image_name=source_image_name,
+                parameters=parameters,
             )
             return {"client_id": "vibevision-api", "prompt": prompt_graph}
 
-        return {
-            "client_id": "vibevision-api",
-            "prompt": {
-                **template,
-                "_vibevision": {
-                    "workflow_key": workflow.comfy_workflow_key,
-                    "prompt": prompt,
-                    "source_image_name": source_image_name,
-                },
-            },
-        }
+        if self._looks_like_prompt_graph(template):
+            prompt_graph = self._apply_prompt_values(
+                copy.deepcopy(template),
+                prompt=prompt,
+                source_image_name=source_image_name,
+                parameters=parameters,
+            )
+            return {"client_id": "vibevision-api", "prompt": prompt_graph}
+
+        raise ValueError(
+            f"Workflow {workflow.comfy_workflow_key} does not contain a valid ComfyUI API prompt graph."
+        )
 
     async def _upload_source_image(self, client: httpx.AsyncClient, source_media_url: str) -> str:
         async with httpx.AsyncClient(timeout=60) as download_client:
@@ -89,35 +94,66 @@ class ComfyUIClient:
         value: Any,
         prompt: str,
         source_image_name: str | None,
+        parameters: dict[str, Any],
     ) -> Any:
         if isinstance(value, dict):
             return {
-                key: self._apply_prompt_values(item, prompt, source_image_name)
+                key: self._apply_prompt_values(item, prompt, source_image_name, parameters)
                 for key, item in value.items()
             }
         if isinstance(value, list):
-            return [self._apply_prompt_values(item, prompt, source_image_name) for item in value]
+            return [
+                self._apply_prompt_values(item, prompt, source_image_name, parameters)
+                for item in value
+            ]
         if value == "__prompt__":
             return prompt
         if value == "__source_image__":
             if not source_image_name:
                 raise ValueError("This ComfyUI workflow requires a source image.")
             return source_image_name
+        if value == "__random_seed__":
+            return random.randint(0, 2**63 - 1)
+        if isinstance(value, str) and value.startswith("__param:") and value.endswith("__"):
+            key = value.removeprefix("__param:").removesuffix("__")
+            if key not in parameters:
+                raise ValueError(f"Workflow parameter {key!r} was not provided.")
+            return parameters[key]
         return value
+
+    def _looks_like_prompt_graph(self, value: dict[str, Any]) -> bool:
+        return bool(value) and all(
+            isinstance(node, dict) and isinstance(node.get("class_type"), str)
+            for node in value.values()
+        )
+
+    def _template_requires_source_image(self, value: Any) -> bool:
+        if isinstance(value, dict):
+            return any(self._template_requires_source_image(item) for item in value.values())
+        if isinstance(value, list):
+            return any(self._template_requires_source_image(item) for item in value)
+        return value == "__source_image__"
 
     async def wait_for_result(self, prompt_id: str) -> list[str]:
         deadline = asyncio.get_running_loop().time() + self.settings.comfyui_poll_timeout_seconds
 
         async with httpx.AsyncClient(base_url=self.settings.comfyui_base_url, timeout=30) as client:
             while asyncio.get_running_loop().time() < deadline:
-                response = await client.get(f"/history/{prompt_id}")
-                response.raise_for_status()
-                result_urls = self._extract_result_urls(response.json(), prompt_id)
+                result_urls = await self._get_result_urls(client, prompt_id)
                 if result_urls:
                     return result_urls
                 await asyncio.sleep(self.settings.comfyui_poll_interval_seconds)
 
         raise TimeoutError(f"ComfyUI job {prompt_id} did not finish before timeout.")
+
+    async def get_result_urls(self, prompt_id: str) -> list[str]:
+        async with httpx.AsyncClient(base_url=self.settings.comfyui_base_url, timeout=30) as client:
+            return await self._get_result_urls(client, prompt_id)
+
+    async def _get_result_urls(self, client: httpx.AsyncClient, prompt_id: str) -> list[str]:
+        response = await client.get(f"/history/{prompt_id}")
+        response.raise_for_status()
+        return self._extract_result_urls(response.json(), prompt_id)
 
     def _extract_result_urls(self, history: dict[str, Any], prompt_id: str) -> list[str]:
         job = history.get(prompt_id) or next(iter(history.values()), None)

@@ -1,12 +1,12 @@
 # VibeVision
 
-VibeVision is an AI generation service for bot-first user workflows. The initial channel is Telegram: users send natural-language requests and media to a bot, the service interprets intent with local Ollama, routes generation/edit/video jobs to ComfyUI workflows, and tracks memberships and credit usage.
+VibeVision is an AI generation service for bot-first user workflows. The initial channel is Telegram: users send natural-language requests and media to a bot, the service understands intent with local Ollama, selects the best matching active workflow, dispatches the job to ComfyUI, and tracks memberships and credit usage.
 
 ## Scope
 
 - Telegram bot webhook entrypoint.
-- Local LLM/VLM intent parsing and image understanding through Ollama.
-- ComfyUI image, edit, and image-to-video workflow dispatch.
+- Local Ollama routing plus prompt enhancement, including optional separate logic and prompt models.
+- ComfyUI workflow dispatch for image generation, editing, and image-to-video jobs.
 - Membership and credit ledger primitives.
 - Admin API for users, jobs, workflows, and credit adjustments.
 - Modern operator UI for user and task management.
@@ -30,15 +30,30 @@ All local ports are configured in `config/vibevision.env`. Put private overrides
 - Ollama: `http://localhost:11434`
 - ComfyUI: `http://localhost:8401`
 
+One-click Windows bootstrap:
+
+```powershell
+.\start-vibevision.bat
+```
+
+This entrypoint checks local config, installs/syncs backend dependencies with `uv`, installs frontend dependencies with `npm` when needed, validates ComfyUI/Ollama configuration, starts services, waits for ports, and opens the local control GUI. Use `.\start-vibevision.bat -Repair` to force dependency repair, or `.\start-vibevision.bat -NoGui` to only start and print status.
+
 Backend:
 
 ```powershell
 cd backend
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -e ".[dev]"
+uv sync --extra dev
 cd ..
 .\scripts\start-backend.ps1
+```
+
+The backend is managed with `uv`. Use `uv run` for local Python tooling:
+
+```powershell
+cd backend
+uv run ruff check app
+uv run python -m compileall app
+uv run pytest
 ```
 
 Frontend:
@@ -90,26 +105,77 @@ Default Ollama model:
 ollama pull huihui_ai/qwen3.5-abliterated:9b
 ```
 
+Optional model split:
+
+- `OLLAMA_LOGIC_MODEL` controls workflow routing and parameter inference.
+- `OLLAMA_PROMPT_MODEL` controls prompt enhancement before generation.
+- If either is blank, VibeVision falls back to `OLLAMA_MODEL`, so the current default still uses one shared model.
+
 The backend ships with SQLite for local development. Use `DATABASE_URL` to point at Postgres when moving toward production.
+
+## Credit Pricing
+
+VibeVision uses one simple task ratio across the bot and admin console:
+
+- Image task: `1` credit.
+- Video task: `10` credits.
+- Daily bonus credits reset at midnight and do not accumulate.
+- Generation consumes daily bonus credits first, then paid credits.
+
+Account ladder:
+
+| Identity | Rule | Recharge multiplier |
+| --- | --- | ---: |
+| Guest | Default identity, receives 5 initial credits | 1.0x |
+| Member | Any recharge promotes the user; first recharge adds 30 bonus credits | 1.0x |
+| VIP | Cumulative recharge reaches USD 100 | 1.1x |
+| SVIP | Cumulative recharge reaches USD 500 | 1.2x |
+
+Recharge products:
+
+| Monthly product | Price | Paid credits | Daily bonus |
+| --- | ---: | ---: | ---: |
+| Monthly subscription | USD 9.9/month | 100 | 10/day |
+| Premium subscription | USD 29.9/month | 330 | 30/day |
 
 ## Telegram MVP Loop
 
-The `/api/telegram/webhook` endpoint now accepts Telegram updates and schedules background processing:
+For local development, run Telegram in local polling mode. This does not require a public URL, tunnel, reverse proxy, or deployed webhook service:
+
+```powershell
+.\scripts\start-telegram-poller.ps1
+```
+
+The poller disables any registered webhook and then listens with Telegram `getUpdates`, so inbound messages work from a local machine behind a normal router as long as the machine can make outbound HTTPS requests to Telegram.
+
+The `/api/telegram/webhook` endpoint is still available when you explicitly want webhook delivery. Both modes share the same message processing loop:
 
 1. Parse Telegram text, caption, image, document, video, or animation messages.
 2. Resolve uploaded media with Telegram `getFile`.
-3. Classify intent with local Ollama; image inputs are sent to the VLM when available, with fallback routing if Ollama is unavailable.
+3. Route the request with the local Ollama logic model against the active workflow catalog, then enhance the final generation prompt with the prompt model; image inputs are sent to the VLM when available, with fallback workflow selection if Ollama is unavailable.
 4. Reserve credits and submit the selected workflow to ComfyUI.
 5. Poll ComfyUI history until outputs appear or the configured timeout is reached.
 6. Upload generated media back to the Telegram chat and update task status.
 
-Set `TELEGRAM_BOT_TOKEN` in ignored `config/vibevision.local.env`, then expose the API with your preferred tunnel and register:
+Set `TELEGRAM_BOT_TOKEN` in ignored `config/vibevision.local.env`.
+
+Webhook mode is optional. If you need it, expose the API with your preferred tunnel and register:
 
 ```powershell
 $token = "<bot-token>"
 $url = "https://your-public-domain.example/api/telegram/webhook"
 Invoke-RestMethod "https://api.telegram.org/bot$token/setWebhook" -Method Post -Body @{ url = $url }
 ```
+
+You can also inspect or manage the webhook with the bundled helper:
+
+```powershell
+.\scripts\telegram-webhook.ps1 -Action info
+.\scripts\telegram-webhook.ps1 -Action set -PublicBaseUrl "https://your-public-domain.example"
+.\scripts\telegram-webhook.ps1 -Action delete
+```
+
+The high-frequency service monitor keeps Telegram checks local-only for responsiveness. Use the webhook helper when you need live Telegram registration diagnostics.
 
 For image or video generation to complete, ComfyUI must be reachable at the host and port configured in `config/vibevision.env`. This workspace is configured for the local ComfyUI folder `E:\ComfyUI_Feb` and port `8401`.
 

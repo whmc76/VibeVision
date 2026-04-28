@@ -16,6 +16,7 @@ from app.schemas import (
     CreditAdjustment,
     DashboardStats,
     GenerationTaskRead,
+    RechargeRequest,
     ServiceActionResponse,
     ServiceOverview,
     UserCreate,
@@ -23,7 +24,13 @@ from app.schemas import (
     UserUpdate,
     WorkflowRead,
 )
-from app.services.credits import InsufficientCreditsError, adjust_credits
+from app.services.credits import (
+    InsufficientCreditsError,
+    UnknownRechargePlanError,
+    adjust_credits,
+    apply_recharge,
+    refresh_daily_bonus,
+)
 from app.services.service_monitor import ServiceMonitor
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -92,13 +99,35 @@ def list_users(
     else:
         statement = statement.where(User.is_hidden.is_(False))
     statement = statement.order_by(User.created_at.desc()).limit(limit)
-    return list(db.scalars(statement))
+    users = list(db.scalars(statement))
+    for user in users:
+        refresh_daily_bonus(db, user)
+    db.commit()
+    return users
 
 
 @router.post("/users", response_model=UserRead, status_code=201)
 def create_user(payload: UserCreate, db: Session = Depends(get_db)) -> User:
     user = User(**payload.model_dump())
     db.add(user)
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+@router.post("/users/{user_id}/recharge", response_model=UserRead)
+def recharge_user(
+    user_id: int,
+    payload: RechargeRequest,
+    db: Session = Depends(get_db),
+) -> User:
+    user = db.get(User, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found.")
+    try:
+        apply_recharge(db, user, payload.plan)
+    except UnknownRechargePlanError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
     db.commit()
     db.refresh(user)
     return user

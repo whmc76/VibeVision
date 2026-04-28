@@ -3,9 +3,9 @@ import {
   Ban,
   Bot,
   CheckCircle2,
-  ChevronRight,
   CircleAlert,
   Coins,
+  CreditCard,
   Cpu,
   Film,
   Image,
@@ -22,7 +22,7 @@ import {
   WandSparkles,
 } from "lucide-react";
 import type { ReactNode } from "react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 
 import {
   adjustCredits,
@@ -31,6 +31,7 @@ import {
   getTasks,
   getUsers,
   getWorkflows,
+  rechargeUser,
   serviceAction,
   updateUser,
 } from "./api";
@@ -48,6 +49,7 @@ import type {
 } from "./types";
 
 type ServiceAction = "start" | "stop" | "restart";
+const LIVE_REFRESH_INTERVAL_MS = 5000;
 
 const statusTone: Record<UserStatus | TaskStatus, string> = {
   active: "green",
@@ -84,10 +86,54 @@ const taskIcons: Record<TaskKind, typeof Image> = {
 };
 
 const tierLabels: Record<MembershipTier, string> = {
-  free: "Free",
-  starter: "Starter",
-  pro: "Pro",
-  studio: "Studio",
+  free: "游客",
+  starter: "正式会员",
+  pro: "VIP",
+  studio: "SVIP",
+};
+
+const pricingPlans = [
+  {
+    tier: "free",
+    name: "游客",
+    price: "$0",
+    credits: 5,
+    detail: "默认赠送 5 积分",
+  },
+  {
+    tier: "starter",
+    name: "月度订阅",
+    price: "$9.9/月",
+    credits: 100,
+    detail: "100 积分 + 每日 10 赠送积分",
+  },
+  {
+    tier: "pro",
+    name: "高级订阅",
+    price: "$29.9/月",
+    credits: 330,
+    detail: "330 积分 + 每日 30 赠送积分",
+    featured: true,
+  },
+  {
+    tier: "studio",
+    name: "VIP / SVIP",
+    price: "$100+",
+    credits: 0,
+    detail: "累计 $100 享 1.1 倍，累计 $500 享 1.2 倍",
+  },
+] satisfies Array<{
+  tier: MembershipTier;
+  name: string;
+  price: string;
+  credits: number;
+  detail: string;
+  featured?: boolean;
+}>;
+
+const planLabels: Record<string, string> = {
+  monthly: "月度订阅",
+  premium: "高级订阅",
 };
 
 function App() {
@@ -99,29 +145,82 @@ function App() {
   const [selectedUserId, setSelectedUserId] = useState<number | null>(null);
   const [query, setQuery] = useState("");
   const [isLoading, setIsLoading] = useState(true);
-  const [notice, setNotice] = useState("Demo data appears when the API is unavailable.");
+  const [notice, setNotice] = useState("");
   const [pendingServiceAction, setPendingServiceAction] = useState<{
     service: string;
     action: ServiceAction;
   } | null>(null);
+  const latestRequestIdRef = useRef(0);
 
-  async function loadData(search = query) {
-    setIsLoading(true);
-    const [nextStats, nextUsers, nextTasks, nextWorkflows, nextServices] = await Promise.all([
-      getStats(),
-      getUsers(search),
-      getTasks(),
-      getWorkflows(),
-      getServices(),
-    ]);
-    setStats(nextStats);
-    setUsers(nextUsers);
-    setTasks(nextTasks);
-    setWorkflows(nextWorkflows);
-    setServices(nextServices);
-    setSelectedUserId((current) => current ?? nextUsers[0]?.id ?? null);
-    setIsLoading(false);
+  async function loadData(search = query, silent = false) {
+    const requestId = latestRequestIdRef.current + 1;
+    latestRequestIdRef.current = requestId;
+    if (!silent) {
+      setIsLoading(true);
+    }
+    const [statsResult, usersResult, tasksResult, workflowsResult, servicesResult] =
+      await Promise.allSettled([
+        getStats(),
+        getUsers(search),
+        getTasks(),
+        getWorkflows(),
+        getServices(),
+      ]);
+
+    if (latestRequestIdRef.current !== requestId) {
+      return;
+    }
+
+    if (statsResult.status === "fulfilled") {
+      setStats(statsResult.value);
+    } else {
+      setStats(null);
+    }
+
+    if (usersResult.status === "fulfilled") {
+      setUsers(usersResult.value);
+      setSelectedUserId((current) =>
+        usersResult.value.some((user) => user.id === current) ? current : usersResult.value[0]?.id ?? null,
+      );
+    } else {
+      setUsers([]);
+      setSelectedUserId(null);
+    }
+
+    if (tasksResult.status === "fulfilled") {
+      setTasks(tasksResult.value);
+    } else {
+      setTasks([]);
+    }
+
+    if (workflowsResult.status === "fulfilled") {
+      setWorkflows(workflowsResult.value);
+    } else {
+      setWorkflows([]);
+    }
+
+    if (servicesResult.status === "fulfilled") {
+      setServices(servicesResult.value);
+    } else {
+      setServices(null);
+    }
+
+    const firstFailure = [statsResult, usersResult, tasksResult, workflowsResult, servicesResult].find(
+      (result) => result.status === "rejected",
+    );
+    setNotice(
+      firstFailure?.status === "rejected"
+        ? `Live data unavailable. ${getErrorMessage(firstFailure.reason, "Request failed.")}`
+        : "",
+    );
+    if (!silent) {
+      setIsLoading(false);
+    }
   }
+
+  const refreshLiveData = useEffectEvent(async () => {
+    await loadData(query, true);
+  });
 
   useEffect(() => {
     void loadData("");
@@ -129,10 +228,10 @@ function App() {
 
   useEffect(() => {
     const interval = window.setInterval(() => {
-      void getServices().then(setServices);
-    }, 7000);
+      void refreshLiveData();
+    }, LIVE_REFRESH_INTERVAL_MS);
     return () => window.clearInterval(interval);
-  }, []);
+  }, [refreshLiveData]);
 
   const selectedUser = useMemo(
     () => users.find((user) => user.id === selectedUserId) ?? users[0],
@@ -182,6 +281,17 @@ function App() {
     }
   }
 
+  async function handleRecharge(plan: "monthly" | "premium") {
+    if (!selectedUser) return;
+    try {
+      const updated = await rechargeUser(selectedUser.id, plan);
+      setUsers((current) => current.map((user) => (user.id === updated.id ? updated : user)));
+      setNotice(`${planLabels[plan]} recharge applied.`);
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Recharge failed.");
+    }
+  }
+
   async function handleServiceAction(service: string, action: ServiceAction) {
     if (pendingServiceAction) return;
     setPendingServiceAction({ service, action });
@@ -223,6 +333,10 @@ function App() {
             <Sparkles size={18} />
             Workflows
           </a>
+          <a className="nav-item" href="#pricing">
+            <CreditCard size={18} />
+            Pricing
+          </a>
           <a className="nav-item" href="#monitor">
             <Server size={18} />
             Monitor
@@ -235,17 +349,21 @@ function App() {
 
         <div className="service-panel">
           <span className="eyebrow">Service</span>
-          {(services?.services ?? []).slice(0, 5).map((service) => (
-            <div className="service-row" key={service.key}>
-              <span className="service-row-name">
-                <StatusDot tone={serviceTone[service.status] ?? "neutral"} />
-                {service.name}
-              </span>
-              <span className={`service-row-status ${serviceTone[service.status] ?? "neutral"}`}>
-                {service.status}
-              </span>
-            </div>
-          ))}
+          {(services?.services?.length ?? 0) > 0 ? (
+            (services?.services ?? []).slice(0, 5).map((service) => (
+              <div className="service-row" key={service.key}>
+                <span className="service-row-name">
+                  <StatusDot tone={serviceTone[service.status] ?? "neutral"} />
+                  {service.name}
+                </span>
+                <span className={`service-row-status ${serviceTone[service.status] ?? "neutral"}`}>
+                  {service.status}
+                </span>
+              </div>
+            ))
+          ) : (
+            <p className="empty-state">No live service data.</p>
+          )}
         </div>
       </aside>
 
@@ -277,6 +395,31 @@ function App() {
           <Metric label="Credits spent" value={stats?.credits_spent ?? 0} icon={Coins} />
         </section>
 
+        <section className="pricing-strip" id="pricing">
+          <div className="section-heading">
+            <div>
+              <span className="eyebrow">Pricing</span>
+              <h2>Credit packages</h2>
+            </div>
+            <div className="rate-summary">
+              <span>图片任务 1 积分</span>
+              <span>视频任务 10 积分</span>
+              <span>首充 +30 积分</span>
+              <span>赠送积分优先消耗</span>
+            </div>
+          </div>
+          <div className="pricing-grid">
+            {pricingPlans.map((plan) => (
+              <article className={`pricing-item ${plan.featured ? "featured" : ""}`} key={plan.tier}>
+                <span>{plan.name}</span>
+                <strong>{plan.price}</strong>
+                <small>{plan.credits > 0 ? `${plan.credits} 积分` : "充值倍率"}</small>
+                <p>{plan.detail}</p>
+              </article>
+            ))}
+          </div>
+        </section>
+
         <section className="monitor-region" id="monitor">
           <div className="section-heading">
             <div>
@@ -288,20 +431,24 @@ function App() {
               <span>Pending {services?.queue_pending ?? 0}</span>
             </div>
           </div>
-          <div className="service-grid">
-            {(services?.services ?? []).map((service) => (
-              <ServiceCard
-                key={service.key}
-                service={service}
-                onAction={handleServiceAction}
-                queueRunning={services?.queue_running ?? 0}
-                queuePending={services?.queue_pending ?? 0}
-                pendingAction={
-                  pendingServiceAction?.service === service.key ? pendingServiceAction.action : null
-                }
-              />
-            ))}
-          </div>
+          {(services?.services?.length ?? 0) > 0 ? (
+            <div className="service-grid">
+              {(services?.services ?? []).map((service) => (
+                <ServiceCard
+                  key={service.key}
+                  service={service}
+                  onAction={handleServiceAction}
+                  queueRunning={services?.queue_running ?? 0}
+                  queuePending={services?.queue_pending ?? 0}
+                  pendingAction={
+                    pendingServiceAction?.service === service.key ? pendingServiceAction.action : null
+                  }
+                />
+              ))}
+            </div>
+          ) : (
+            <p className="empty-state">No live service data available.</p>
+          )}
         </section>
 
         <section className="content-grid">
@@ -311,7 +458,7 @@ function App() {
                 <span className="eyebrow">Accounts</span>
                 <h2>Telegram users</h2>
               </div>
-              <span className="notice">{notice}</span>
+              {notice ? <span className="notice">{notice}</span> : null}
             </div>
 
             <div className="user-table" role="table" aria-label="Telegram user table">
@@ -321,29 +468,33 @@ function App() {
                 <span>Credits</span>
                 <span>Status</span>
               </div>
-              {users.map((user) => (
-                <button
-                  className={`table-row user-row ${selectedUser?.id === user.id ? "selected" : ""}`}
-                  key={user.id}
-                  onClick={() => setSelectedUserId(user.id)}
-                  role="row"
-                >
-                  <span className="identity-cell">
-                    <span className="avatar">
-                      <UserRound size={17} />
+              {users.length ? (
+                users.map((user) => (
+                  <button
+                    className={`table-row user-row ${selectedUser?.id === user.id ? "selected" : ""}`}
+                    key={user.id}
+                    onClick={() => setSelectedUserId(user.id)}
+                    role="row"
+                  >
+                    <span className="identity-cell">
+                      <span className="avatar">
+                        <UserRound size={17} />
+                      </span>
+                      <span>
+                        <strong>{user.display_name ?? user.username ?? `User ${user.id}`}</strong>
+                        <small>@{user.username ?? user.telegram_id ?? "unknown"}</small>
+                      </span>
                     </span>
+                    <span>{getUserGroupLabel(user)}</span>
+                    <span>{formatNumber(getAvailableCredits(user))}</span>
                     <span>
-                      <strong>{user.display_name ?? user.username ?? `User ${user.id}`}</strong>
-                      <small>@{user.username ?? user.telegram_id ?? "unknown"}</small>
+                      <Badge tone={statusTone[user.status]}>{user.status}</Badge>
                     </span>
-                  </span>
-                  <span>{getUserGroupLabel(user)}</span>
-                  <span>{formatNumber(user.credit_balance)}</span>
-                  <span>
-                    <Badge tone={statusTone[user.status]}>{user.status}</Badge>
-                  </span>
-                </button>
-              ))}
+                  </button>
+                ))
+              ) : (
+                <p className="empty-state table-empty">No live users found.</p>
+              )}
             </div>
           </section>
 
@@ -356,15 +507,18 @@ function App() {
                   </span>
                   <div>
                     <span className="eyebrow">Selected user</span>
-                    <h2>{selectedUser.display_name ?? selectedUser.username}</h2>
+                    <h2>{selectedUser.display_name ?? selectedUser.username ?? `User ${selectedUser.id}`}</h2>
                     <p>@{selectedUser.username ?? selectedUser.telegram_id}</p>
                   </div>
                 </div>
 
                 <div className="balance-band">
-                  <span>Credit balance</span>
-                  <strong>{formatNumber(selectedUser.credit_balance)}</strong>
-                  <small>{formatNumber(selectedUser.total_spent_credits)} spent lifetime</small>
+                  <span>Available credits</span>
+                  <strong>{formatNumber(getAvailableCredits(selectedUser))}</strong>
+                  <small>
+                    {formatNumber(selectedUser.credit_balance)} paid +{" "}
+                    {formatNumber(selectedUser.daily_bonus_balance)} daily
+                  </small>
                 </div>
 
                 {selectedUser.is_admin || selectedUser.is_hidden ? (
@@ -392,6 +546,25 @@ function App() {
                   </div>
                 </div>
 
+                <div className="account-facts">
+                  <span>
+                    <small>Subscription</small>
+                    <strong>{planLabels[selectedUser.subscription_plan ?? ""] ?? "None"}</strong>
+                  </span>
+                  <span>
+                    <small>Daily reset</small>
+                    <strong>{formatNumber(selectedUser.daily_bonus_allowance)} credits</strong>
+                  </span>
+                  <span>
+                    <small>Recharge total</small>
+                    <strong>{formatUsd(selectedUser.total_recharge_usd_cents)}</strong>
+                  </span>
+                  <span>
+                    <small>Spent lifetime</small>
+                    <strong>{formatNumber(selectedUser.total_spent_credits)}</strong>
+                  </span>
+                </div>
+
                 <div className="control-group">
                   <span className="control-label">Account status</span>
                   <div className="icon-actions">
@@ -404,11 +577,19 @@ function App() {
                 <div className="control-group">
                   <span className="control-label">Credits</span>
                   <div className="credit-actions">
-                    {[50, 200, 1000, -50].map((amount) => (
+                    {[10, 50, 100, -10].map((amount) => (
                       <button key={amount} onClick={() => void handleCredit(amount)}>
                         {amount > 0 ? `+${amount}` : amount}
                       </button>
                     ))}
+                  </div>
+                </div>
+
+                <div className="control-group">
+                  <span className="control-label">Recharge</span>
+                  <div className="recharge-actions">
+                    <button onClick={() => void handleRecharge("monthly")}>$9.9/月 / 100</button>
+                    <button onClick={() => void handleRecharge("premium")}>$29.9/月 / 330</button>
                   </div>
                 </div>
 
@@ -424,8 +605,10 @@ function App() {
                   )}
                 </div>
               </>
-            ) : (
+            ) : users.length ? (
               <p className="empty-state">Select a user to manage credits and status.</p>
+            ) : (
+              <p className="empty-state">No live user data available.</p>
             )}
           </aside>
         </section>
@@ -437,23 +620,27 @@ function App() {
               <h2>ComfyUI workflows</h2>
             </div>
           </div>
-          <div className="workflow-grid">
-            {workflows.map((workflow) => {
-              const Icon = taskIcons[workflow.kind];
-              return (
-                <article className="workflow-item" key={workflow.id}>
-                  <Icon size={21} />
-                  <div>
-                    <strong>{workflow.name}</strong>
-                    <span>{workflow.comfy_workflow_key}</span>
-                  </div>
-                  <Badge tone={workflow.is_active ? "green" : "neutral"}>
-                    {workflow.credit_cost} credits
-                  </Badge>
-                </article>
-              );
-            })}
-          </div>
+          {workflows.length ? (
+            <div className="workflow-grid">
+              {workflows.map((workflow) => {
+                const Icon = taskIcons[workflow.kind];
+                return (
+                  <article className="workflow-item" key={workflow.id}>
+                    <Icon size={21} />
+                    <div>
+                      <strong>{workflow.name}</strong>
+                      <span>{workflow.comfy_workflow_key}</span>
+                    </div>
+                    <Badge tone={workflow.is_active ? "green" : "neutral"}>
+                      {workflow.credit_cost} credits
+                    </Badge>
+                  </article>
+                );
+              })}
+            </div>
+          ) : (
+            <p className="empty-state">No live workflows available.</p>
+          )}
         </section>
       </section>
     </main>
@@ -481,10 +668,12 @@ function Metric({
 function TaskItem({ task }: { task: GenerationTask }) {
   const Icon = taskIcons[task.kind];
   return (
-    <article className="task-item">
+    <article className={`task-item ${task.error_message ? "has-error" : ""}`}>
       <Icon size={18} />
       <div className="task-copy">
-        <strong>{task.kind}</strong>
+        <strong>
+          {task.kind} · #{task.id}
+        </strong>
         <span className="task-summary">{task.interpreted_prompt ?? task.original_text ?? "No prompt"}</span>
         {task.error_message ? <code className="task-error">{task.error_message}</code> : null}
       </div>
@@ -605,6 +794,10 @@ function StatusDot({ tone }: { tone: string }) {
   return <span className={`status-dot ${tone}`} />;
 }
 
+function getErrorMessage(error: unknown, fallback: string) {
+  return error instanceof Error ? error.message : fallback;
+}
+
 function getUserGroupLabel(user: User) {
   if (user.is_admin && user.is_hidden) {
     return "Hidden Admin";
@@ -620,6 +813,17 @@ function getUserGroupLabel(user: User) {
 
 function formatNumber(value: number) {
   return new Intl.NumberFormat("en-US").format(value);
+}
+
+function formatUsd(cents: number) {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+  }).format(cents / 100);
+}
+
+function getAvailableCredits(user: User) {
+  return user.credit_balance + user.daily_bonus_balance;
 }
 
 export default App;

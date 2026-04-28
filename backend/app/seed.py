@@ -1,16 +1,14 @@
 import json
 from pathlib import Path
 
-from sqlalchemy import or_, select
+from sqlalchemy import delete, or_, select
 from sqlalchemy.orm import Session
 
 from app.models import (
     CreditLedgerEntry,
     GenerationTask,
     LedgerReason,
-    MembershipTier,
     TaskKind,
-    TaskStatus,
     User,
     UserStatus,
     Workflow,
@@ -18,6 +16,7 @@ from app.models import (
 from app.services.credits import adjust_credits
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "workflow_templates"
+DEMO_TELEGRAM_IDS = ("711820445", "503188902", "913588201")
 HIDDEN_ADMIN_USERNAME = "cyberdicklang"
 HIDDEN_ADMIN_DISPLAY_NAME = "CyberDickLang"
 HIDDEN_ADMIN_GRANT_AMOUNT = 1_000_000
@@ -28,20 +27,31 @@ def load_template(filename: str) -> dict:
     return json.loads((TEMPLATE_DIR / filename).read_text(encoding="utf-8"))
 
 
+def _is_dispatchable_template(template: dict) -> bool:
+    if not template:
+        return False
+    if isinstance(template.get("prompt"), dict):
+        return True
+    return all(
+        isinstance(node, dict) and isinstance(node.get("class_type"), str)
+        for node in template.values()
+    )
+
+
 DEFAULT_WORKFLOWS = [
     {
-        "name": "SDXL Prompt To Image",
+        "name": "Z-Image Turbo Text To Image",
         "kind": TaskKind.image_generate,
-        "comfy_workflow_key": "sdxl-text-to-image",
-        "credit_cost": 6,
-        "description": "Generate images from text prompts.",
-        "template": {},
+        "comfy_workflow_key": "z-image-turbo-text-to-image",
+        "credit_cost": 1,
+        "description": "Generate portrait-friendly text-to-image outputs with Z-Image Turbo at 3:4, up to 1536px on the long edge.",
+        "template": load_template("z_image_turbo_text_to_image_api.json"),
     },
     {
         "name": "Image Edit Assistant",
         "kind": TaskKind.image_edit,
         "comfy_workflow_key": "flux2klein-single-edit",
-        "credit_cost": 8,
+        "credit_cost": 1,
         "description": "Edit uploaded images with the Flux2 Klein single-edit workflow.",
         "template": load_template("flux2klein_single_edit_api.json"),
     },
@@ -49,9 +59,19 @@ DEFAULT_WORKFLOWS = [
         "name": "Image To Video Motion",
         "kind": TaskKind.video_image_to_video,
         "comfy_workflow_key": "image-to-video",
-        "credit_cost": 18,
+        "credit_cost": 10,
         "description": "Animate user-provided images into short videos.",
         "template": {},
+        "is_active": False,
+    },
+    {
+        "name": "Text To Video",
+        "kind": TaskKind.video_text_to_video,
+        "comfy_workflow_key": "text-to-video",
+        "credit_cost": 10,
+        "description": "Generate short videos from text prompts.",
+        "template": {},
+        "is_active": False,
     },
     {
         "name": "Image Understanding Prompt Writer",
@@ -60,11 +80,12 @@ DEFAULT_WORKFLOWS = [
         "credit_cost": 2,
         "description": "Understand media and expand user intent into generation prompts.",
         "template": {},
+        "is_active": False,
     },
 ]
 
 
-def seed_defaults(db: Session, include_demo: bool = False) -> None:
+def seed_defaults(db: Session) -> None:
     for item in DEFAULT_WORKFLOWS:
         exists = db.scalar(
             select(Workflow).where(
@@ -84,7 +105,7 @@ def seed_defaults(db: Session, include_demo: bool = False) -> None:
         exists.credit_cost = item["credit_cost"]
         exists.description = item["description"]
         exists.template = item["template"]
-        exists.is_active = True
+        exists.is_active = item.get("is_active", _is_dispatchable_template(item["template"]))
         db.add(exists)
 
     db.flush()
@@ -94,95 +115,29 @@ def seed_defaults(db: Session, include_demo: bool = False) -> None:
     if legacy_edit_workflow:
         legacy_edit_workflow.is_active = False
         db.add(legacy_edit_workflow)
+    legacy_text_to_image_workflow = db.scalar(
+        select(Workflow).where(Workflow.comfy_workflow_key == "sdxl-text-to-image")
+    )
+    if legacy_text_to_image_workflow:
+        legacy_text_to_image_workflow.is_active = False
+        db.add(legacy_text_to_image_workflow)
     db.flush()
 
-    if include_demo:
-        seed_demo_data(db)
+    purge_demo_data(db)
     seed_hidden_admin_user(db)
 
     db.commit()
 
 
-def seed_demo_data(db: Session) -> None:
-    has_users = db.scalar(select(User.id).limit(1))
-    if has_users:
-        return
-
-    users = [
-        User(
-            telegram_id="711820445",
-            username="studio_mira",
-            display_name="Mira Chen",
-            status=UserStatus.active,
-            membership_tier=MembershipTier.studio,
-            credit_balance=1840,
-            total_spent_credits=20390,
-        ),
-        User(
-            telegram_id="503188902",
-            username="framecraft",
-            display_name="Frame Craft",
-            status=UserStatus.active,
-            membership_tier=MembershipTier.pro,
-            credit_balance=612,
-            total_spent_credits=9340,
-        ),
-        User(
-            telegram_id="913588201",
-            username="nora_ai",
-            display_name="Nora",
-            status=UserStatus.limited,
-            membership_tier=MembershipTier.starter,
-            credit_balance=76,
-            total_spent_credits=1288,
-        ),
-    ]
-    db.add_all(users)
-    db.flush()
-
-    workflows = {
-        workflow.comfy_workflow_key: workflow
-        for workflow in db.scalars(select(Workflow)).all()
-    }
-
-    db.add_all(
-        [
-            GenerationTask(
-                user_id=users[0].id,
-                workflow_id=workflows["sdxl-text-to-image"].id,
-                kind=TaskKind.image_generate,
-                status=TaskStatus.running,
-                original_text="赛博茶室，夜景，柔和灯光",
-                interpreted_prompt=(
-                    "A cinematic cyberpunk tea room at night with soft practical lighting."
-                ),
-                credit_cost=6,
-                external_job_id="demo-running-88",
-            ),
-            GenerationTask(
-                user_id=users[1].id,
-                workflow_id=workflows["image-to-video"].id,
-                kind=TaskKind.video_image_to_video,
-                status=TaskStatus.queued,
-                original_text="让这张产品图镜头慢慢推进",
-                interpreted_prompt="Slow camera push-in with subtle product light movement.",
-                source_media_url="https://example.com/source.png",
-                credit_cost=18,
-            ),
-            GenerationTask(
-                user_id=users[2].id,
-                workflow_id=workflows["flux2klein-single-edit"].id,
-                kind=TaskKind.image_edit,
-                status=TaskStatus.failed,
-                original_text="把背景改成高级灰展厅",
-                interpreted_prompt="Replace the background with a refined neutral gallery showroom.",
-                source_media_url="https://example.com/edit.png",
-                credit_cost=8,
-                error_message="ComfyUI timeout after 30s",
-                external_job_id="demo-failed-71",
-            ),
-        ]
+def purge_demo_data(db: Session) -> None:
+    demo_user_ids = list(
+        db.scalars(select(User.id).where(User.telegram_id.in_(DEMO_TELEGRAM_IDS)))
     )
+    if not demo_user_ids:
+        return
+    db.execute(delete(CreditLedgerEntry).where(CreditLedgerEntry.user_id.in_(demo_user_ids)))
+    db.execute(delete(GenerationTask).where(GenerationTask.user_id.in_(demo_user_ids)))
+    db.execute(delete(User).where(User.id.in_(demo_user_ids)))
 
 
 def seed_hidden_admin_user(db: Session) -> None:

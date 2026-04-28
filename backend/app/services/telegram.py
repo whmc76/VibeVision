@@ -1,10 +1,30 @@
+import asyncio
+import json
 from dataclasses import dataclass
 from pathlib import PurePosixPath
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
+from uuid import uuid4
 
 import httpx
 
 from app.core.config import Settings
 from app.models import TaskKind
+
+
+def build_remove_keyboard_markup() -> dict[str, bool]:
+    return {"remove_keyboard": True}
+
+
+def build_bot_commands() -> list[dict[str, str]]:
+    return [
+        {"command": "photo", "description": "照片工作流"},
+        {"command": "p", "description": "照片工作流快捷命令"},
+        {"command": "video", "description": "视频工作流"},
+        {"command": "v", "description": "视频工作流快捷命令"},
+        {"command": "check", "description": "套餐和剩余点数"},
+        {"command": "start", "description": "欢迎与使用说明"},
+    ]
 
 
 @dataclass(frozen=True)
@@ -16,6 +36,19 @@ class TelegramInboundMessage:
     display_name: str | None
     text: str | None
     source_file_id: str | None
+    source_media_type: str | None
+
+
+@dataclass(frozen=True)
+class TelegramWebhookInfo:
+    url: str | None
+    pending_update_count: int
+    has_custom_certificate: bool
+    last_error_date: int | None
+    last_error_message: str | None
+    ip_address: str | None
+    max_connections: int | None
+    allowed_updates: list[str]
 
 
 class TelegramUpdateError(ValueError):
@@ -44,7 +77,7 @@ class TelegramClient:
             raise TelegramUpdateError("Telegram update is missing identity fields.")
 
         text = message.get("text") or message.get("caption")
-        source_file_id = self._extract_source_file_id(message)
+        source_file_id, source_media_type = self._extract_source_media(message)
 
         first_name = from_user.get("first_name") or ""
         last_name = from_user.get("last_name") or ""
@@ -58,27 +91,30 @@ class TelegramClient:
             display_name=display_name,
             text=text,
             source_file_id=source_file_id,
+            source_media_type=source_media_type,
         )
 
-    def _extract_source_file_id(self, message: dict) -> str | None:
+    def _extract_source_media(self, message: dict) -> tuple[str | None, str | None]:
         photos = message.get("photo")
         if isinstance(photos, list) and photos:
             largest = max(photos, key=lambda item: item.get("file_size") or 0)
-            return largest.get("file_id")
+            return largest.get("file_id"), "image"
 
         document = message.get("document")
         if isinstance(document, dict) and self._is_supported_document(document):
-            return document.get("file_id")
+            mime_type = str(document.get("mime_type") or "")
+            media_type = "video" if mime_type.startswith("video/") else "image"
+            return document.get("file_id"), media_type
 
         video = message.get("video")
         if isinstance(video, dict):
-            return video.get("file_id")
+            return video.get("file_id"), "video"
 
         animation = message.get("animation")
         if isinstance(animation, dict):
-            return animation.get("file_id")
+            return animation.get("file_id"), "video"
 
-        return None
+        return None, None
 
     def _is_supported_document(self, document: dict) -> bool:
         mime_type = str(document.get("mime_type") or "")
@@ -91,8 +127,55 @@ class TelegramClient:
             raise TelegramUpdateError("Telegram did not return file_path.")
         return f"{self.file_base_url}/{file_path}"
 
-    async def send_message(self, chat_id: str, text: str, reply_to_message_id: str | None = None) -> None:
-        payload: dict[str, str | int] = {"chat_id": chat_id, "text": text}
+    async def get_webhook_info(self) -> TelegramWebhookInfo:
+        data = await self._request("getWebhookInfo", {})
+        return TelegramWebhookInfo(
+            url=data.get("url") or None,
+            pending_update_count=int(data.get("pending_update_count") or 0),
+            has_custom_certificate=bool(data.get("has_custom_certificate")),
+            last_error_date=int(data["last_error_date"]) if data.get("last_error_date") else None,
+            last_error_message=data.get("last_error_message") or None,
+            ip_address=data.get("ip_address") or None,
+            max_connections=int(data["max_connections"]) if data.get("max_connections") else None,
+            allowed_updates=[str(item) for item in data.get("allowed_updates") or []],
+        )
+
+    async def delete_webhook(self, drop_pending_updates: bool = False) -> None:
+        await self._request("deleteWebhook", {"drop_pending_updates": drop_pending_updates})
+
+    async def set_my_commands(self) -> None:
+        await self._request("setMyCommands", {"commands": build_bot_commands()})
+
+    async def get_updates(
+        self,
+        offset: int | None = None,
+        timeout: int = 30,
+        limit: int = 20,
+    ) -> list[dict]:
+        payload: dict[str, int | list[str]] = {
+            "timeout": timeout,
+            "limit": limit,
+            "allowed_updates": ["message", "edited_message", "my_chat_member"],
+        }
+        if offset is not None:
+            payload["offset"] = offset
+        data = await self._request("getUpdates", payload, timeout=timeout + 10)
+        if not isinstance(data, list):
+            raise TelegramUpdateError(f"Telegram returned invalid getUpdates result: {data}")
+        return [item for item in data if isinstance(item, dict)]
+
+    async def send_message(
+        self,
+        chat_id: str,
+        text: str,
+        reply_to_message_id: str | None = None,
+        reply_markup: dict[str, object] | None = None,
+    ) -> None:
+        payload: dict[str, object] = {
+            "chat_id": chat_id,
+            "text": text,
+            "reply_markup": reply_markup or build_remove_keyboard_markup(),
+        }
         if reply_to_message_id:
             payload["reply_to_message_id"] = int(reply_to_message_id)
         await self._request("sendMessage", payload)
@@ -132,7 +215,7 @@ class TelegramClient:
             content_type = response.headers.get("content-type", "application/octet-stream")
 
         filename = PurePosixPath(url.split("?", 1)[0]).name or "vibevision-output"
-        if kind == TaskKind.video_image_to_video:
+        if kind in {TaskKind.video_text_to_video, TaskKind.video_image_to_video}:
             method = "sendVideo"
             file_field = "video"
         elif content_type.startswith("image/"):
@@ -148,19 +231,120 @@ class TelegramClient:
         if reply_to_message_id:
             data["reply_to_message_id"] = int(reply_to_message_id)
 
-        files = {file_field: (filename, media_bytes, content_type)}
-        async with httpx.AsyncClient(base_url=self.api_base_url, timeout=60) as client:
-            response = await client.post(f"/{method}", data=data, files=files)
-            response.raise_for_status()
-            body = response.json()
-        if not body.get("ok"):
-            raise TelegramUpdateError(str(body))
+        await self._upload_request(
+            method=method,
+            data=data,
+            file_field=file_field,
+            filename=filename,
+            media_bytes=media_bytes,
+            content_type=content_type,
+        )
 
-    async def _request(self, method: str, payload: dict) -> dict:
-        async with httpx.AsyncClient(base_url=self.api_base_url, timeout=30) as client:
-            response = await client.post(f"/{method}", json=payload)
-            response.raise_for_status()
-            body = response.json()
+    async def _request(self, method: str, payload: dict, timeout: int = 30) -> dict:
+        return await asyncio.to_thread(self._request_sync, method, payload, timeout)
+
+    def _request_sync(self, method: str, payload: dict, timeout: int) -> dict:
+        request = self._build_json_request(method, payload)
+        body = self._execute_request(request, timeout=timeout)
+        return body.get("result") or {}
+
+    async def _upload_request(
+        self,
+        method: str,
+        data: dict[str, str | int],
+        file_field: str,
+        filename: str,
+        media_bytes: bytes,
+        content_type: str,
+    ) -> dict:
+        return await asyncio.to_thread(
+            self._upload_request_sync,
+            method,
+            data,
+            file_field,
+            filename,
+            media_bytes,
+            content_type,
+        )
+
+    def _upload_request_sync(
+        self,
+        method: str,
+        data: dict[str, str | int],
+        file_field: str,
+        filename: str,
+        media_bytes: bytes,
+        content_type: str,
+    ) -> dict:
+        boundary = f"----VibeVision{uuid4().hex}"
+        body = self._encode_multipart_form_data(
+            boundary=boundary,
+            data=data,
+            file_field=file_field,
+            filename=filename,
+            media_bytes=media_bytes,
+            content_type=content_type,
+        )
+        request = Request(
+            url=f"{self.api_base_url}/{method}",
+            data=body,
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+            method="POST",
+        )
+        response = self._execute_request(request, timeout=60)
+        return response.get("result") or {}
+
+    def _build_json_request(self, method: str, payload: dict) -> Request:
+        if payload:
+            return Request(
+                url=f"{self.api_base_url}/{method}",
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+        return Request(url=f"{self.api_base_url}/{method}", method="GET")
+
+    def _execute_request(self, request: Request, timeout: int = 30) -> dict:
+        try:
+            with urlopen(request, timeout=timeout) as response:
+                body = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")
+            raise TelegramUpdateError(f"Telegram API HTTP {exc.code}: {detail}") from exc
+        except URLError as exc:
+            raise TelegramUpdateError(f"Telegram API network error: {exc.reason}") from exc
+        except TimeoutError as exc:
+            raise TelegramUpdateError("Telegram API request timed out.") from exc
+
         if not body.get("ok"):
             raise TelegramUpdateError(str(body))
-        return body.get("result") or {}
+        return body
+
+    def _encode_multipart_form_data(
+        self,
+        boundary: str,
+        data: dict[str, str | int],
+        file_field: str,
+        filename: str,
+        media_bytes: bytes,
+        content_type: str,
+    ) -> bytes:
+        parts: list[bytes] = []
+
+        for key, value in data.items():
+            parts.append(f"--{boundary}\r\n".encode())
+            parts.append(f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode())
+            parts.append(str(value).encode("utf-8"))
+            parts.append(b"\r\n")
+
+        parts.append(f"--{boundary}\r\n".encode())
+        parts.append(
+            (
+                f'Content-Disposition: form-data; name="{file_field}"; filename="{filename}"\r\n'
+                f"Content-Type: {content_type}\r\n\r\n"
+            ).encode()
+        )
+        parts.append(media_bytes)
+        parts.append(b"\r\n")
+        parts.append(f"--{boundary}--\r\n".encode())
+        return b"".join(parts)

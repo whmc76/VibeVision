@@ -6,6 +6,7 @@ from app.db.session import get_db
 from app.schemas import BotMessageRequest, BotMessageResponse
 from app.services.credits import InsufficientCreditsError
 from app.services.error_details import append_error_detail
+from app.services.intent import TargetOutputRequiredError
 from app.services.orchestrator import GenerationOrchestrator, WorkflowUnavailableError
 from app.services.task_runner import process_telegram_update
 
@@ -23,6 +24,8 @@ async def submit_bot_message(
         task = await orchestrator.handle_bot_message(db, payload)
     except WorkflowUnavailableError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except TargetOutputRequiredError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
     except InsufficientCreditsError as exc:
         raise HTTPException(status_code=402, detail=str(exc)) from exc
 

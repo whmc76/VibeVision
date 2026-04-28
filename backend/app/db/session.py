@@ -1,6 +1,6 @@
 from collections.abc import Generator
 
-from sqlalchemy import create_engine, inspect, text
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
 
 from app.core.config import get_settings
@@ -11,9 +11,20 @@ class Base(DeclarativeBase):
 
 
 settings = get_settings()
-connect_args = {"check_same_thread": False} if settings.database_url.startswith("sqlite") else {}
+is_sqlite = settings.database_url.startswith("sqlite")
+connect_args = {"check_same_thread": False, "timeout": 30} if is_sqlite else {}
 engine = create_engine(settings.database_url, connect_args=connect_args)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
+
+
+if is_sqlite:
+
+    @event.listens_for(engine, "connect")
+    def _set_sqlite_pragmas(dbapi_connection, _connection_record) -> None:
+        cursor = dbapi_connection.cursor()
+        cursor.execute("PRAGMA journal_mode=WAL")
+        cursor.execute("PRAGMA busy_timeout=30000")
+        cursor.close()
 
 
 def get_db() -> Generator[Session, None, None]:
@@ -41,10 +52,18 @@ def _ensure_sqlite_columns() -> None:
         "generation_tasks": {
             "telegram_chat_id": "VARCHAR(64)",
             "telegram_message_id": "VARCHAR(64)",
+            "bonus_credit_cost": "INTEGER NOT NULL DEFAULT 0",
+            "paid_credit_cost": "INTEGER NOT NULL DEFAULT 0",
         },
         "users": {
             "is_admin": "BOOLEAN NOT NULL DEFAULT 0",
             "is_hidden": "BOOLEAN NOT NULL DEFAULT 0",
+            "daily_bonus_balance": "INTEGER NOT NULL DEFAULT 0",
+            "daily_bonus_allowance": "INTEGER NOT NULL DEFAULT 0",
+            "daily_bonus_granted_on": "DATE",
+            "subscription_plan": "VARCHAR(64)",
+            "subscription_expires_at": "DATETIME",
+            "total_recharge_usd_cents": "INTEGER NOT NULL DEFAULT 0",
         },
     }
 

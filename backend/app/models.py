@@ -1,7 +1,7 @@
-from datetime import datetime
+from datetime import date, datetime
 from enum import StrEnum
 
-from sqlalchemy import JSON, DateTime, Enum, ForeignKey, Integer, String, Text, func
+from sqlalchemy import JSON, Date, DateTime, Enum, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
@@ -14,6 +14,7 @@ class UserStatus(StrEnum):
 
 
 class MembershipTier(StrEnum):
+    # Stored values are kept stable for existing local databases.
     free = "free"
     starter = "starter"
     pro = "pro"
@@ -39,6 +40,8 @@ class TaskStatus(StrEnum):
 class LedgerReason(StrEnum):
     signup_grant = "signup_grant"
     admin_adjustment = "admin_adjustment"
+    recharge_purchase = "recharge_purchase"
+    daily_bonus_reset = "daily_bonus_reset"
     task_reserved = "task_reserved"
     task_refunded = "task_refunded"
 
@@ -56,7 +59,13 @@ class User(Base):
     )
     is_admin: Mapped[bool] = mapped_column(default=False)
     is_hidden: Mapped[bool] = mapped_column(default=False)
-    credit_balance: Mapped[int] = mapped_column(Integer, default=50)
+    credit_balance: Mapped[int] = mapped_column(Integer, default=5)
+    daily_bonus_balance: Mapped[int] = mapped_column(Integer, default=0)
+    daily_bonus_allowance: Mapped[int] = mapped_column(Integer, default=0)
+    daily_bonus_granted_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    subscription_plan: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    subscription_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    total_recharge_usd_cents: Mapped[int] = mapped_column(Integer, default=0)
     total_spent_credits: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -100,6 +109,8 @@ class GenerationTask(Base):
     external_job_id: Mapped[str | None] = mapped_column(String(160), index=True)
     telegram_chat_id: Mapped[str | None] = mapped_column(String(64), index=True)
     telegram_message_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    bonus_credit_cost: Mapped[int] = mapped_column(Integer, default=0)
+    paid_credit_cost: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()

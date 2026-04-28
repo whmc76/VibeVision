@@ -33,12 +33,21 @@ function Import-VibeVisionConfig {
 Import-VibeVisionConfig -Path $ConfigPath
 Import-VibeVisionConfig -Path $LocalConfigPath
 
+if (-not $env:TELEGRAM_BOT_TOKEN) {
+  throw "TELEGRAM_BOT_TOKEN is not configured."
+}
+
 $env:PYTHONPATH = Join-Path $Root "backend"
 Set-Location (Join-Path $Root "backend")
 
-$UvCommand = Get-Command "uv" -ErrorAction SilentlyContinue
-if ($UvCommand) {
-  uv run uvicorn app.main:app --reload --host $env:API_HOST --port $env:API_PORT
+$VenvPython = Join-Path $Root "backend\.venv\Scripts\python.exe"
+if (Test-Path -LiteralPath $VenvPython) {
+  & $VenvPython -m app.services.telegram_poller
 } else {
-  python -m uvicorn app.main:app --reload --host $env:API_HOST --port $env:API_PORT
+  $UvCommand = Get-Command "uv" -ErrorAction SilentlyContinue
+  if ($UvCommand) {
+    uv run python -m app.services.telegram_poller
+  } else {
+    python -m app.services.telegram_poller
+  }
 }

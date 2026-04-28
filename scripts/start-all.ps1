@@ -35,8 +35,18 @@ function Test-PortListening {
   return [bool](Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
 }
 
+function Test-TelegramPollerRunning {
+  $Process = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+    Where-Object { $_.CommandLine -and $_.CommandLine -like "*app.services.telegram_poller*" } |
+    Select-Object -First 1
+  return [bool]$Process
+}
+
 Import-VibeVisionConfig -Path $ConfigPath
 Import-VibeVisionConfig -Path $LocalConfigPath
+
+Write-Host "Cleaning existing VibeVision service processes before start."
+& (Join-Path $Root "scripts\stop-all.ps1") -ConfigPath $ConfigPath -LocalConfigPath $LocalConfigPath
 
 if (-not (Test-PortListening -Port ([int]$env:OLLAMA_PORT))) {
   $OllamaCommand = Get-Command "ollama" -ErrorAction SilentlyContinue
@@ -73,6 +83,20 @@ if (-not (Test-PortListening -Port ([int]$env:ADMIN_FRONTEND_PORT))) {
   Write-Host "Started admin frontend on port $($env:ADMIN_FRONTEND_PORT)."
 } else {
   Write-Host "Admin frontend is already listening on port $($env:ADMIN_FRONTEND_PORT)."
+}
+
+if ($env:TELEGRAM_BOT_TOKEN) {
+  if (-not (Test-TelegramPollerRunning)) {
+    Start-Process `
+      -FilePath "powershell" `
+      -ArgumentList @("-NoProfile", "-ExecutionPolicy", "Bypass", "-File", (Join-Path $Root "scripts\start-telegram-poller.ps1"), "-ConfigPath", $ConfigPath, "-LocalConfigPath", $LocalConfigPath) `
+      -WindowStyle Hidden
+    Write-Host "Started Telegram local poller."
+  } else {
+    Write-Host "Telegram local poller is already running."
+  }
+} else {
+  Write-Host "TELEGRAM_BOT_TOKEN is not configured; skipping Telegram poller."
 }
 
 Write-Host "VibeVision services requested."

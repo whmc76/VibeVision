@@ -1,5 +1,6 @@
 import asyncio
-import json
+import csv
+import io
 import subprocess
 import time
 from pathlib import Path
@@ -9,6 +10,7 @@ import httpx
 from app.core.config import Settings
 from app.schemas import ServiceActionResponse, ServiceOverview, ServiceStatus
 from app.services.error_details import format_exception_details
+from app.services.telegram import TelegramClient, TelegramUpdateError
 
 
 class ServiceMonitor:
@@ -193,17 +195,91 @@ class ServiceMonitor:
             url=self.settings.ollama_base_url,
             port=self.settings.ollama_port,
             endpoint="/api/tags",
-            detail_online=f"Model: {self.settings.ollama_model}",
+            detail_online=f"Models: {self.settings.ollama_model_summary}",
             detail_offline="Ollama is not reachable.",
         )
 
     async def _telegram_status(self) -> ServiceStatus:
-        configured = bool(self.settings.telegram_bot_token)
+        pid = self._pid_for_port(self.settings.api_port)
+        poller_pid = self._telegram_poller_pid()
+        if not self.settings.telegram_bot_token:
+            return ServiceStatus(
+                key="telegram",
+                name="Telegram Bot",
+                status="unconfigured",
+                port=self.settings.api_port,
+                pid=pid,
+                process_name=self._process_name_for_pid(pid),
+                detail="Set TELEGRAM_BOT_TOKEN in local config.",
+                can_start=False,
+                can_stop=False,
+            )
+
+        started = time.perf_counter()
+        try:
+            webhook = await TelegramClient(self.settings).get_webhook_info()
+            latency = int((time.perf_counter() - started) * 1000)
+        except TelegramUpdateError as exc:
+            return ServiceStatus(
+                key="telegram",
+                name="Telegram Bot",
+                status="offline",
+                port=self.settings.api_port,
+                pid=pid,
+                process_name=self._process_name_for_pid(pid),
+                detail=f"Telegram webhook check failed: {format_exception_details(exc)}",
+                can_start=False,
+                can_stop=False,
+            )
+
+        if not webhook.url:
+            if poller_pid:
+                return ServiceStatus(
+                    key="telegram",
+                    name="Telegram Bot",
+                    status="configured",
+                    url="local getUpdates polling",
+                    port=self.settings.api_port,
+                    pid=poller_pid,
+                    process_name=self._process_name_for_pid(poller_pid),
+                    detail="Local Telegram poller is running.",
+                    latency_ms=latency,
+                    can_start=False,
+                    can_stop=False,
+                )
+
+            detail = "Bot token is configured, but no webhook URL is registered."
+            if webhook.pending_update_count:
+                detail += f" Pending updates: {webhook.pending_update_count}."
+            return ServiceStatus(
+                key="telegram",
+                name="Telegram Bot",
+                status="unconfigured",
+                port=self.settings.api_port,
+                pid=pid,
+                process_name=self._process_name_for_pid(pid),
+                detail=detail,
+                latency_ms=latency,
+                can_start=False,
+                can_stop=False,
+            )
+
+        detail = "Webhook registered."
+        if webhook.pending_update_count:
+            detail += f" Pending updates: {webhook.pending_update_count}."
+        if webhook.last_error_message:
+            detail += f" Last error: {webhook.last_error_message}"
+
         return ServiceStatus(
             key="telegram",
             name="Telegram Bot",
-            status="configured" if configured else "unconfigured",
-            detail="Bot token is configured." if configured else "Set TELEGRAM_BOT_TOKEN in local config.",
+            status="offline" if webhook.last_error_message else "configured",
+            url=webhook.url,
+            port=self.settings.api_port,
+            pid=poller_pid or pid,
+            process_name=self._process_name_for_pid(poller_pid or pid),
+            detail=detail,
+            latency_ms=latency,
             can_start=False,
             can_stop=False,
         )
@@ -221,7 +297,7 @@ class ServiceMonitor:
         pid = self._pid_for_port(port)
         try:
             started = time.perf_counter()
-            async with httpx.AsyncClient(timeout=3) as client:
+            async with httpx.AsyncClient(timeout=3, trust_env=False) as client:
                 response = await client.get(f"{url}{endpoint}")
                 response.raise_for_status()
             latency = int((time.perf_counter() - started) * 1000)
@@ -250,7 +326,11 @@ class ServiceMonitor:
 
     async def _comfyui_queue_counts(self) -> tuple[int, int]:
         try:
-            async with httpx.AsyncClient(base_url=self.settings.comfyui_base_url, timeout=3) as client:
+            async with httpx.AsyncClient(
+                base_url=self.settings.comfyui_base_url,
+                timeout=3,
+                trust_env=False,
+            ) as client:
                 response = await client.get("/queue")
                 response.raise_for_status()
                 body = response.json()
@@ -273,60 +353,77 @@ class ServiceMonitor:
             return None
 
     def _pids_for_ports(self, ports: list[int]) -> dict[int, int]:
-        port_list = ",".join(str(port) for port in sorted(set(ports)))
-        script = (
-            f"$ports=@({port_list}); "
-            "Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue "
-            "| Where-Object { $ports -contains $_.LocalPort } "
-            "| Sort-Object LocalPort "
-            "| Select-Object LocalPort,OwningProcess "
-            "| ConvertTo-Json -Compress"
+        target_ports = {int(port) for port in ports if port > 0}
+        if not target_ports:
+            return {}
+
+        completed = subprocess.run(
+            ["netstat", "-ano", "-p", "TCP"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
         )
-        output = self._powershell(script).strip()
-        if not output:
+        if completed.returncode != 0:
             return {}
-        try:
-            rows = json.loads(output)
-        except json.JSONDecodeError:
-            return {}
-        if isinstance(rows, dict):
-            rows = [rows]
-        return {
-            int(row["LocalPort"]): int(row["OwningProcess"])
-            for row in rows
-            if row.get("LocalPort") and row.get("OwningProcess")
-        }
+
+        result: dict[int, int] = {}
+        for line in completed.stdout.splitlines():
+            parts = line.split()
+            if len(parts) < 5 or parts[0] != "TCP" or parts[-2] != "LISTENING":
+                continue
+            try:
+                port = int(parts[1].rsplit(":", 1)[1])
+                pid = int(parts[-1])
+            except (IndexError, ValueError):
+                continue
+            if port in target_ports and port not in result:
+                result[port] = pid
+        return result
 
     def _process_name_for_pid(self, pid: int | None) -> str | None:
         if not pid:
             return None
         return self._process_name_by_pid.get(pid)
 
-    def _process_names_for_pids(self, pids: list[int]) -> dict[int, str]:
-        pid_list = ",".join(str(pid) for pid in sorted(set(pids)))
-        if not pid_list:
-            return {}
+    def _telegram_poller_pid(self) -> int | None:
         script = (
-            f"$pids=@({pid_list}); "
             "Get-CimInstance Win32_Process -ErrorAction SilentlyContinue "
-            "| Where-Object { $pids -contains $_.ProcessId } "
-            "| Select-Object ProcessId,Name "
-            "| ConvertTo-Json -Compress"
+            "| Where-Object { $_.CommandLine -like '*app.services.telegram_poller*' } "
+            "| Select-Object -First 1 -ExpandProperty ProcessId"
         )
-        output = self._powershell(script).strip()
-        if not output:
-            return {}
+        output = self._powershell(script)
         try:
-            rows = json.loads(output)
-        except json.JSONDecodeError:
+            return int(output.strip()) if output.strip() else None
+        except ValueError:
+            return None
+
+    def _process_names_for_pids(self, pids: list[int]) -> dict[int, str]:
+        target_pids = {int(pid) for pid in pids if pid}
+        if not target_pids:
             return {}
-        if isinstance(rows, dict):
-            rows = [rows]
-        return {
-            int(row["ProcessId"]): str(row["Name"])
-            for row in rows
-            if row.get("ProcessId") and row.get("Name")
-        }
+
+        completed = subprocess.run(
+            ["tasklist", "/fo", "csv", "/nh"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+        if completed.returncode != 0:
+            return {}
+
+        result: dict[int, str] = {}
+        for row in csv.reader(io.StringIO(completed.stdout)):
+            if len(row) < 2:
+                continue
+            try:
+                pid = int(row[1])
+            except ValueError:
+                continue
+            if pid in target_pids:
+                result[pid] = row[0]
+        return result
 
     def _command_line_for_pid(self, pid: int) -> str:
         script = (

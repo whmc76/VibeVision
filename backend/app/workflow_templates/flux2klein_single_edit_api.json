@@ -28,7 +28,7 @@
       "class_type": "CLIPTextEncode",
       "inputs": {
         "clip": ["110", 0],
-        "text": "nsfw"
+        "text": ""
       },
       "_meta": {
         "title": "Negative Prompt"
@@ -63,7 +63,7 @@
     "103": {
       "class_type": "RandomNoise",
       "inputs": {
-        "noise_seed": 514403527945792
+        "noise_seed": "__random_seed__"
       }
     },
     "108": {
@@ -71,7 +71,7 @@
       "inputs": {
         "image": ["81", 0],
         "upscale_method": "nearest-exact",
-        "megapixels": 4,
+        "megapixels": 2,
         "resolution_steps": 1
       }
     },

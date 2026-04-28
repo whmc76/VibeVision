@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -15,6 +15,12 @@ class UserRead(BaseModel):
     is_admin: bool
     is_hidden: bool
     credit_balance: int
+    daily_bonus_balance: int
+    daily_bonus_allowance: int
+    daily_bonus_granted_on: date | None
+    subscription_plan: str | None
+    subscription_expires_at: datetime | None
+    total_recharge_usd_cents: int
     total_spent_credits: int
     created_at: datetime
     updated_at: datetime
@@ -29,7 +35,7 @@ class UserCreate(BaseModel):
     membership_tier: MembershipTier = MembershipTier.free
     is_admin: bool = False
     is_hidden: bool = False
-    credit_balance: int = 50
+    credit_balance: int = 5
 
 
 class UserUpdate(BaseModel):
@@ -43,6 +49,10 @@ class UserUpdate(BaseModel):
 class CreditAdjustment(BaseModel):
     amount: int = Field(..., ge=-100000, le=100000)
     note: str | None = None
+
+
+class RechargeRequest(BaseModel):
+    plan: str
 
 
 class WorkflowRead(BaseModel):
@@ -73,6 +83,8 @@ class GenerationTaskRead(BaseModel):
     external_job_id: str | None
     telegram_chat_id: str | None
     telegram_message_id: str | None
+    bonus_credit_cost: int
+    paid_credit_cost: int
     created_at: datetime
     updated_at: datetime
 
@@ -85,6 +97,8 @@ class BotMessageRequest(BaseModel):
     display_name: str | None = None
     text: str | None = None
     source_media_url: str | None = None
+    source_media_type: str | None = None
+    target_output: str | None = None
     telegram_chat_id: str | None = None
     telegram_message_id: str | None = None
 

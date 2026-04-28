@@ -4,12 +4,8 @@
 
 1. A Telegram user sends text, image, or image plus instructions.
 2. The webhook stores or resolves the user account.
-3. Ollama classifies intent, inspects attached images, and expands prompts when needed.
-4. The orchestrator chooses the matching ComfyUI workflow:
-   - `image.generate`
-   - `image.edit`
-   - `video.image_to_video`
-   - `prompt.expand`
+3. Ollama inspects the request, selects the best matching active workflow, and expands the generation prompt in a separate enhancement step.
+4. The orchestrator validates the selected workflow, reserves credits, and dispatches the matching ComfyUI prompt graph.
 5. Credits are reserved before queueing the job.
 6. ComfyUI receives the workflow prompt graph.
 7. Results are written back to the task record and can be sent to Telegram.
@@ -18,8 +14,8 @@
 
 - `routers/telegram.py`: channel-specific Telegram webhook handling.
 - `routers/admin.py`: operator API for the management frontend.
-- `services/orchestrator.py`: intent-to-workflow decision and credit reservation.
-- `services/intent.py`: Ollama LLM/VLM API client and fallback classifier.
+- `services/orchestrator.py`: workflow catalog loading, credit reservation, and dispatch validation.
+- `services/intent.py`: Ollama workflow router, prompt enhancer, and fallback selector.
 - `services/comfyui.py`: ComfyUI prompt submission.
 - `services/credits.py`: ledger-safe credit reservation and adjustment.
 

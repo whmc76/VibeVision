@@ -1,4 +1,3 @@
-import { mockServices, mockStats, mockTasks, mockUsers, mockWorkflows } from "./mockData";
 import type {
   DashboardStats,
   GenerationTask,
@@ -39,56 +38,37 @@ async function readErrorDetail(response: Response): Promise<string> {
 
   try {
     const payload = JSON.parse(raw) as Record<string, unknown>;
-    return typeof payload.detail === "string" && payload.detail.trim() ? payload.detail : raw;
+    if (typeof payload.detail === "string" && payload.detail.trim()) {
+      return payload.detail;
+    }
+    if (typeof payload.message === "string" && payload.message.trim()) {
+      return payload.message;
+    }
+    return JSON.stringify(payload);
   } catch {
     return raw;
   }
 }
 
 export async function getStats(): Promise<DashboardStats> {
-  try {
-    return await request<DashboardStats>("/admin/stats");
-  } catch {
-    return mockStats;
-  }
+  return request<DashboardStats>("/admin/stats");
 }
 
 export async function getUsers(query = ""): Promise<User[]> {
-  try {
-    const suffix = query ? `?query=${encodeURIComponent(query)}` : "";
-    return await request<User[]>(`/admin/users${suffix}`);
-  } catch {
-    const lowered = query.toLowerCase();
-    return mockUsers.filter((user) =>
-      [user.username, user.display_name, user.telegram_id]
-        .filter(Boolean)
-        .some((value) => value!.toLowerCase().includes(lowered)),
-    );
-  }
+  const suffix = query ? `?query=${encodeURIComponent(query)}` : "";
+  return request<User[]>(`/admin/users${suffix}`);
 }
 
 export async function getTasks(): Promise<GenerationTask[]> {
-  try {
-    return await request<GenerationTask[]>("/admin/tasks");
-  } catch {
-    return mockTasks;
-  }
+  return request<GenerationTask[]>("/admin/tasks");
 }
 
 export async function getWorkflows(): Promise<Workflow[]> {
-  try {
-    return await request<Workflow[]>("/admin/workflows");
-  } catch {
-    return mockWorkflows;
-  }
+  return request<Workflow[]>("/admin/workflows");
 }
 
 export async function getServices(): Promise<ServiceOverview> {
-  try {
-    return await request<ServiceOverview>("/admin/services");
-  } catch {
-    return mockServices;
-  }
+  return request<ServiceOverview>("/admin/services");
 }
 
 export async function serviceAction(
@@ -118,5 +98,12 @@ export async function adjustCredits(
   return request<User>(`/admin/users/${userId}/credits`, {
     method: "POST",
     body: JSON.stringify({ amount, note }),
+  });
+}
+
+export async function rechargeUser(userId: number, plan: "monthly" | "premium"): Promise<User> {
+  return request<User>(`/admin/users/${userId}/recharge`, {
+    method: "POST",
+    body: JSON.stringify({ plan }),
   });
 }
