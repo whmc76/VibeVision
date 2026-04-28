@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
 from sqlalchemy.orm import Session
 
 from app.core.config import Settings, get_settings
@@ -6,6 +6,7 @@ from app.db.session import get_db
 from app.schemas import BotMessageRequest, BotMessageResponse
 from app.services.credits import InsufficientCreditsError
 from app.services.orchestrator import GenerationOrchestrator, WorkflowUnavailableError
+from app.services.task_runner import process_telegram_update
 
 router = APIRouter(prefix="/telegram", tags=["telegram"])
 
@@ -37,13 +38,18 @@ async def submit_bot_message(
 @router.post("/webhook")
 async def telegram_webhook(
     update: dict,
+    background_tasks: BackgroundTasks,
     x_telegram_bot_api_secret_token: str | None = Header(default=None),
     settings: Settings = Depends(get_settings),
 ) -> dict[str, bool | str]:
     if settings.telegram_webhook_secret and x_telegram_bot_api_secret_token != settings.telegram_webhook_secret:
         raise HTTPException(status_code=401, detail="Invalid Telegram webhook secret.")
 
+    if not settings.telegram_bot_token:
+        raise HTTPException(status_code=503, detail="TELEGRAM_BOT_TOKEN is not configured.")
+
+    background_tasks.add_task(process_telegram_update, update, settings)
     return {
         "ok": True,
-        "message": "Webhook received. Map Telegram updates to /telegram/message in the next integration step.",
+        "message": "Webhook accepted.",
     }

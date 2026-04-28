@@ -6,13 +6,17 @@ import {
   ChevronRight,
   CircleAlert,
   Coins,
+  Cpu,
   Film,
   Image,
-  Loader2,
+  LoaderCircle,
+  Play,
   RefreshCw,
   Search,
+  Server,
   Shield,
   Sparkles,
+  Square,
   UserRound,
   Users,
   WandSparkles,
@@ -22,22 +26,28 @@ import { useEffect, useMemo, useState } from "react";
 
 import {
   adjustCredits,
+  getServices,
   getStats,
   getTasks,
   getUsers,
   getWorkflows,
+  serviceAction,
   updateUser,
 } from "./api";
 import type {
   DashboardStats,
   GenerationTask,
   MembershipTier,
+  ServiceOverview,
+  ServiceStatus,
   TaskKind,
   TaskStatus,
   User,
   UserStatus,
   Workflow,
 } from "./types";
+
+type ServiceAction = "start" | "stop" | "restart";
 
 const statusTone: Record<UserStatus | TaskStatus, string> = {
   active: "green",
@@ -48,6 +58,21 @@ const statusTone: Record<UserStatus | TaskStatus, string> = {
   completed: "green",
   failed: "red",
   cancelled: "neutral",
+};
+
+const serviceTone: Record<string, string> = {
+  online: "green",
+  configured: "green",
+  offline: "red",
+  unconfigured: "amber",
+};
+
+const serviceIcons: Record<string, typeof Server> = {
+  api: Server,
+  frontend: Activity,
+  comfyui: Cpu,
+  ollama: Sparkles,
+  telegram: Bot,
 };
 
 const taskIcons: Record<TaskKind, typeof Image> = {
@@ -69,29 +94,43 @@ function App() {
   const [users, setUsers] = useState<User[]>([]);
   const [tasks, setTasks] = useState<GenerationTask[]>([]);
   const [workflows, setWorkflows] = useState<Workflow[]>([]);
+  const [services, setServices] = useState<ServiceOverview | null>(null);
   const [selectedUserId, setSelectedUserId] = useState<number | null>(null);
   const [query, setQuery] = useState("");
   const [isLoading, setIsLoading] = useState(true);
   const [notice, setNotice] = useState("Demo data appears when the API is unavailable.");
+  const [pendingServiceAction, setPendingServiceAction] = useState<{
+    service: string;
+    action: ServiceAction;
+  } | null>(null);
 
   async function loadData(search = query) {
     setIsLoading(true);
-    const [nextStats, nextUsers, nextTasks, nextWorkflows] = await Promise.all([
+    const [nextStats, nextUsers, nextTasks, nextWorkflows, nextServices] = await Promise.all([
       getStats(),
       getUsers(search),
       getTasks(),
       getWorkflows(),
+      getServices(),
     ]);
     setStats(nextStats);
     setUsers(nextUsers);
     setTasks(nextTasks);
     setWorkflows(nextWorkflows);
+    setServices(nextServices);
     setSelectedUserId((current) => current ?? nextUsers[0]?.id ?? null);
     setIsLoading(false);
   }
 
   useEffect(() => {
     void loadData("");
+  }, []);
+
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      void getServices().then(setServices);
+    }, 7000);
+    return () => window.clearInterval(interval);
   }, []);
 
   const selectedUser = useMemo(
@@ -142,6 +181,21 @@ function App() {
     }
   }
 
+  async function handleServiceAction(service: string, action: ServiceAction) {
+    if (pendingServiceAction) return;
+    setPendingServiceAction({ service, action });
+    setNotice(`${action} requested for ${service}.`);
+    try {
+      const result = await serviceAction(service, action);
+      setNotice(result.message);
+      setServices(await getServices());
+    } catch (error) {
+      setNotice(error instanceof Error ? error.message : "Service action failed.");
+    } finally {
+      setPendingServiceAction(null);
+    }
+  }
+
   return (
     <main className="app-shell">
       <aside className="sidebar" aria-label="Primary">
@@ -168,6 +222,10 @@ function App() {
             <Sparkles size={18} />
             Workflows
           </a>
+          <a className="nav-item" href="#monitor">
+            <Server size={18} />
+            Monitor
+          </a>
           <a className="nav-item" href="#credits">
             <Coins size={18} />
             Credits
@@ -176,18 +234,17 @@ function App() {
 
         <div className="service-panel">
           <span className="eyebrow">Service</span>
-          <div className="service-row">
-            <span>Ollama</span>
-            <StatusDot tone="green" />
-          </div>
-          <div className="service-row">
-            <span>ComfyUI</span>
-            <StatusDot tone="amber" />
-          </div>
-          <div className="service-row">
-            <span>Telegram</span>
-            <StatusDot tone="green" />
-          </div>
+          {(services?.services ?? []).slice(0, 5).map((service) => (
+            <div className="service-row" key={service.key}>
+              <span className="service-row-name">
+                <StatusDot tone={serviceTone[service.status] ?? "neutral"} />
+                {service.name}
+              </span>
+              <span className={`service-row-status ${serviceTone[service.status] ?? "neutral"}`}>
+                {service.status}
+              </span>
+            </div>
+          ))}
         </div>
       </aside>
 
@@ -217,6 +274,33 @@ function App() {
           <Metric label="Active" value={stats?.active_users ?? 0} icon={CheckCircle2} />
           <Metric label="In queue" value={(stats?.queued_tasks ?? 0) + (stats?.running_tasks ?? 0)} icon={Activity} />
           <Metric label="Credits spent" value={stats?.credits_spent ?? 0} icon={Coins} />
+        </section>
+
+        <section className="monitor-region" id="monitor">
+          <div className="section-heading">
+            <div>
+              <span className="eyebrow">Runtime</span>
+              <h2>Service monitor</h2>
+            </div>
+            <div className="queue-summary">
+              <span>Running {services?.queue_running ?? 0}</span>
+              <span>Pending {services?.queue_pending ?? 0}</span>
+            </div>
+          </div>
+          <div className="service-grid">
+            {(services?.services ?? []).map((service) => (
+              <ServiceCard
+                key={service.key}
+                service={service}
+                onAction={handleServiceAction}
+                queueRunning={services?.queue_running ?? 0}
+                queuePending={services?.queue_pending ?? 0}
+                pendingAction={
+                  pendingServiceAction?.service === service.key ? pendingServiceAction.action : null
+                }
+              />
+            ))}
+          </div>
         </section>
 
         <section className="content-grid">
@@ -393,6 +477,93 @@ function TaskItem({ task }: { task: GenerationTask }) {
         <span>{task.interpreted_prompt ?? task.original_text ?? "No prompt"}</span>
       </div>
       <Badge tone={statusTone[task.status]}>{task.status}</Badge>
+    </article>
+  );
+}
+
+function ServiceCard({
+  service,
+  onAction,
+  queueRunning,
+  queuePending,
+  pendingAction,
+}: {
+  service: ServiceStatus;
+  onAction: (service: string, action: ServiceAction) => Promise<void>;
+  queueRunning: number;
+  queuePending: number;
+  pendingAction: ServiceAction | null;
+}) {
+  const Icon = serviceIcons[service.key] ?? Server;
+  const tone = serviceTone[service.status] ?? "neutral";
+  const isComfyUI = service.key === "comfyui";
+  const isBusy = pendingAction !== null;
+  const serviceFacts = [
+    { label: "URL", value: service.url ?? "Not configured", wide: true },
+    { label: "Port", value: service.port?.toString() ?? "-" },
+    { label: "PID", value: service.pid?.toString() ?? "-" },
+    { label: "Process", value: service.process_name ?? "-" },
+    { label: "Latency", value: service.latency_ms === null ? "-" : `${service.latency_ms} ms` },
+    ...(isComfyUI
+      ? [
+          { label: "Running", value: queueRunning.toString() },
+          { label: "Pending", value: queuePending.toString() },
+        ]
+      : []),
+  ];
+
+  const actions: Array<{
+    action: ServiceAction;
+    label: string;
+    icon: typeof Play;
+    disabled: boolean;
+  }> = [
+    { action: "start", label: "Start", icon: Play, disabled: !service.can_start },
+    { action: "restart", label: "Restart", icon: RefreshCw, disabled: !service.can_start && !service.can_stop },
+    { action: "stop", label: "Stop", icon: Square, disabled: !service.can_stop },
+  ];
+
+  return (
+    <article className="service-card">
+      <div className="service-card-head">
+        <span className="service-icon">
+          <Icon size={19} />
+        </span>
+        <div>
+          <strong>{service.name}</strong>
+          <span>{service.detail ?? "No service detail reported."}</span>
+        </div>
+        <Badge tone={tone}>{service.status}</Badge>
+      </div>
+      <div className="service-facts">
+        {serviceFacts.map((fact) => (
+          <span className={fact.wide ? "wide" : undefined} key={fact.label}>
+            <small>{fact.label}</small>
+            <strong>{fact.value}</strong>
+          </span>
+        ))}
+      </div>
+      {isComfyUI ? (
+        <div className="service-actions">
+          {actions.map(({ action, label, icon: ActionIcon, disabled }) => {
+            const isCurrentAction = pendingAction === action;
+            return (
+              <button
+                disabled={isBusy || disabled}
+                key={action}
+                onClick={() => void onAction(service.key, action)}
+              >
+                {isCurrentAction ? (
+                  <LoaderCircle size={15} className="spin" />
+                ) : (
+                  <ActionIcon size={15} />
+                )}
+                {isCurrentAction ? "Working" : label}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
     </article>
   );
 }

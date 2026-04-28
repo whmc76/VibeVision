@@ -95,6 +95,8 @@ class GenerationTask(Base):
     credit_cost: Mapped[int] = mapped_column(Integer, default=0)
     error_message: Mapped[str | None] = mapped_column(Text)
     external_job_id: Mapped[str | None] = mapped_column(String(160), index=True)
+    telegram_chat_id: Mapped[str | None] = mapped_column(String(64), index=True)
+    telegram_message_id: Mapped[str | None] = mapped_column(String(64), index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()

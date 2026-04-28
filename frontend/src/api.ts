@@ -1,14 +1,16 @@
-import { mockStats, mockTasks, mockUsers, mockWorkflows } from "./mockData";
+import { mockServices, mockStats, mockTasks, mockUsers, mockWorkflows } from "./mockData";
 import type {
   DashboardStats,
   GenerationTask,
   MembershipTier,
+  ServiceActionResponse,
+  ServiceOverview,
   User,
   UserStatus,
   Workflow,
 } from "./types";
 
-const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:18741";
+const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:18751";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${API_BASE_URL}/api${path}`, {
@@ -63,6 +65,23 @@ export async function getWorkflows(): Promise<Workflow[]> {
   } catch {
     return mockWorkflows;
   }
+}
+
+export async function getServices(): Promise<ServiceOverview> {
+  try {
+    return await request<ServiceOverview>("/admin/services");
+  } catch {
+    return mockServices;
+  }
+}
+
+export async function serviceAction(
+  service: string,
+  action: "start" | "stop" | "restart",
+): Promise<ServiceActionResponse> {
+  return request<ServiceActionResponse>(`/admin/services/${service}/${action}`, {
+    method: "POST",
+  });
 }
 
 export async function updateUser(

@@ -20,7 +20,11 @@ class GenerationOrchestrator:
 
     async def handle_bot_message(self, db: Session, payload: BotMessageRequest) -> GenerationTask:
         user = self._get_or_create_user(db, payload)
-        intent = await self.intent.classify(payload.text, has_image=bool(payload.source_media_url))
+        intent = await self.intent.classify(
+            payload.text,
+            has_image=bool(payload.source_media_url),
+            source_media_url=payload.source_media_url,
+        )
         workflow = self._select_workflow(db, intent.kind)
 
         task = GenerationTask(
@@ -32,6 +36,8 @@ class GenerationOrchestrator:
             interpreted_prompt=intent.prompt,
             source_media_url=payload.source_media_url,
             credit_cost=workflow.credit_cost,
+            telegram_chat_id=payload.telegram_chat_id,
+            telegram_message_id=payload.telegram_message_id,
         )
         db.add(task)
         db.flush()

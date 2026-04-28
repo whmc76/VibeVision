@@ -2,6 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from app.core.config import get_settings
 from app.db.session import get_db
 from app.models import (
     GenerationTask,
@@ -15,12 +16,15 @@ from app.schemas import (
     CreditAdjustment,
     DashboardStats,
     GenerationTaskRead,
+    ServiceActionResponse,
+    ServiceOverview,
     UserCreate,
     UserRead,
     UserUpdate,
     WorkflowRead,
 )
 from app.services.credits import InsufficientCreditsError, adjust_credits
+from app.services.service_monitor import ServiceMonitor
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -146,3 +150,23 @@ def list_tasks(
 @router.get("/workflows", response_model=list[WorkflowRead])
 def list_workflows(db: Session = Depends(get_db)) -> list[Workflow]:
     return list(db.scalars(select(Workflow).order_by(Workflow.kind, Workflow.name)))
+
+
+@router.get("/services", response_model=ServiceOverview)
+async def service_overview() -> ServiceOverview:
+    return await ServiceMonitor(get_settings()).overview()
+
+
+@router.post("/services/{service}/start", response_model=ServiceActionResponse)
+async def start_service(service: str) -> ServiceActionResponse:
+    return await ServiceMonitor(get_settings()).start(service)
+
+
+@router.post("/services/{service}/stop", response_model=ServiceActionResponse)
+async def stop_service(service: str) -> ServiceActionResponse:
+    return await ServiceMonitor(get_settings()).stop(service)
+
+
+@router.post("/services/{service}/restart", response_model=ServiceActionResponse)
+async def restart_service(service: str) -> ServiceActionResponse:
+    return await ServiceMonitor(get_settings()).restart(service)

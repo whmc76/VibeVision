@@ -33,6 +33,8 @@ export interface GenerationTask {
   credit_cost: number;
   error_message: string | null;
   external_job_id: string | null;
+  telegram_chat_id: string | null;
+  telegram_message_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -55,4 +57,31 @@ export interface DashboardStats {
   running_tasks: number;
   completed_tasks: number;
   credits_spent: number;
+}
+
+export interface ServiceStatus {
+  key: string;
+  name: string;
+  status: string;
+  url: string | null;
+  port: number | null;
+  pid: number | null;
+  process_name: string | null;
+  detail: string | null;
+  latency_ms: number | null;
+  can_start: boolean;
+  can_stop: boolean;
+}
+
+export interface ServiceOverview {
+  services: ServiceStatus[];
+  queue_running: number;
+  queue_pending: number;
+}
+
+export interface ServiceActionResponse {
+  service: string;
+  action: string;
+  ok: boolean;
+  message: string;
 }

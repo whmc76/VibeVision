@@ -1,7 +1,24 @@
-from sqlalchemy import select
+import json
+from pathlib import Path
+
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from app.models import GenerationTask, MembershipTier, TaskKind, TaskStatus, User, UserStatus, Workflow
+from app.models import (
+    GenerationTask,
+    MembershipTier,
+    TaskKind,
+    TaskStatus,
+    User,
+    UserStatus,
+    Workflow,
+)
+
+TEMPLATE_DIR = Path(__file__).resolve().parent / "workflow_templates"
+
+
+def load_template(filename: str) -> dict:
+    return json.loads((TEMPLATE_DIR / filename).read_text(encoding="utf-8"))
 
 
 DEFAULT_WORKFLOWS = [
@@ -16,10 +33,10 @@ DEFAULT_WORKFLOWS = [
     {
         "name": "Image Edit Assistant",
         "kind": TaskKind.image_edit,
-        "comfy_workflow_key": "image-edit-inpaint",
+        "comfy_workflow_key": "flux2klein-single-edit",
         "credit_cost": 8,
-        "description": "Edit or restyle uploaded images.",
-        "template": {},
+        "description": "Edit uploaded images with the Flux2 Klein single-edit workflow.",
+        "template": load_template("flux2klein_single_edit_api.json"),
     },
     {
         "name": "Image To Video Motion",
@@ -42,9 +59,34 @@ DEFAULT_WORKFLOWS = [
 
 def seed_defaults(db: Session, include_demo: bool = False) -> None:
     for item in DEFAULT_WORKFLOWS:
-        exists = db.scalar(select(Workflow).where(Workflow.comfy_workflow_key == item["comfy_workflow_key"]))
+        exists = db.scalar(
+            select(Workflow).where(
+                or_(
+                    Workflow.comfy_workflow_key == item["comfy_workflow_key"],
+                    Workflow.name == item["name"],
+                )
+            )
+        )
         if not exists:
             db.add(Workflow(**item))
+            continue
+
+        exists.name = item["name"]
+        exists.kind = item["kind"]
+        exists.comfy_workflow_key = item["comfy_workflow_key"]
+        exists.credit_cost = item["credit_cost"]
+        exists.description = item["description"]
+        exists.template = item["template"]
+        exists.is_active = True
+        db.add(exists)
+
+    db.flush()
+    legacy_edit_workflow = db.scalar(
+        select(Workflow).where(Workflow.comfy_workflow_key == "image-edit-inpaint")
+    )
+    if legacy_edit_workflow:
+        legacy_edit_workflow.is_active = False
+        db.add(legacy_edit_workflow)
     db.flush()
 
     if include_demo:
@@ -121,7 +163,7 @@ def seed_demo_data(db: Session) -> None:
             ),
             GenerationTask(
                 user_id=users[2].id,
-                workflow_id=workflows["image-edit-inpaint"].id,
+                workflow_id=workflows["flux2klein-single-edit"].id,
                 kind=TaskKind.image_edit,
                 status=TaskStatus.failed,
                 original_text="把背景改成高级灰展厅",

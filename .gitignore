@@ -7,7 +7,8 @@ venv/
 .env
 .env.*
 !.env.example
-config/vibevision.local.env
+config/*.local.env
+data/
 
 node_modules/
 dist/

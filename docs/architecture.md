@@ -4,7 +4,7 @@
 
 1. A Telegram user sends text, image, or image plus instructions.
 2. The webhook stores or resolves the user account.
-3. Ollama classifies intent and expands prompts when needed.
+3. Ollama classifies intent, inspects attached images, and expands prompts when needed.
 4. The orchestrator chooses the matching ComfyUI workflow:
    - `image.generate`
    - `image.edit`
@@ -19,7 +19,7 @@
 - `routers/telegram.py`: channel-specific Telegram webhook handling.
 - `routers/admin.py`: operator API for the management frontend.
 - `services/orchestrator.py`: intent-to-workflow decision and credit reservation.
-- `services/intent.py`: Ollama API client and fallback classifier.
+- `services/intent.py`: Ollama LLM/VLM API client and fallback classifier.
 - `services/comfyui.py`: ComfyUI prompt submission.
 - `services/credits.py`: ledger-safe credit reservation and adjustment.
 

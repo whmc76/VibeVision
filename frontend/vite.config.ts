@@ -33,7 +33,7 @@ function readUnifiedConfig(): Record<string, string> {
   }
 
   process.env.VITE_API_BASE_URL ??=
-    config.VITE_API_BASE_URL ?? `http://localhost:${config.API_PORT ?? "18741"}`;
+    config.VITE_API_BASE_URL ?? `http://localhost:${config.API_PORT ?? "18751"}`;
 
   return config;
 }

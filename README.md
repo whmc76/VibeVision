@@ -5,7 +5,7 @@ VibeVision is an AI generation service for bot-first user workflows. The initial
 ## Scope
 
 - Telegram bot webhook entrypoint.
-- Local LLM intent parsing through Ollama.
+- Local LLM/VLM intent parsing and image understanding through Ollama.
 - ComfyUI image, edit, and image-to-video workflow dispatch.
 - Membership and credit ledger primitives.
 - Admin API for users, jobs, workflows, and credit adjustments.
@@ -23,12 +23,12 @@ scripts/    PowerShell launch scripts that read config/vibevision.env and local 
 
 ## Quick Start
 
-All local ports are configured in `config/vibevision.env`. Put private overrides such as `TELEGRAM_BOT_TOKEN` in ignored `config/vibevision.local.env`. The default ports intentionally use a less common range:
+All local ports are configured in `config/vibevision.env`. Put private overrides such as `TELEGRAM_BOT_TOKEN` in ignored `config/vibevision.local.env`. Ollama uses its standard local port, while VibeVision services use a less common range:
 
-- API: `http://localhost:18741`
+- API: `http://localhost:18751`
 - Admin frontend: `http://localhost:18742`
-- Ollama: `http://localhost:18743`
-- ComfyUI: `http://localhost:18744`
+- Ollama: `http://localhost:11434`
+- ComfyUI: `http://localhost:8401`
 
 Backend:
 
@@ -50,15 +50,71 @@ cd ..
 .\scripts\start-frontend.ps1
 ```
 
-If your local Ollama or ComfyUI still runs on its standard port, change only `OLLAMA_PORT` or `COMFYUI_PORT` in `config/vibevision.env`.
+ComfyUI backend service:
+
+```powershell
+.\scripts\start-comfyui.ps1
+```
+
+This starts the ComfyUI HTTP backend from `COMFYUI_ROOT` and does not open the ComfyUI browser UI.
+
+Start or stop the local service group:
+
+```powershell
+.\scripts\start-all.ps1
+.\scripts\stop-all.ps1
+```
+
+Local service monitor GUI:
+
+```powershell
+.\scripts\vibevision-control.ps1
+```
+
+The control window can start the VibeVision background services when it opens, stop them when it exits, refresh service status, open the admin frontend, and show timestamped start/stop/refresh output in its terminal pane. `Start all` starts Ollama when available, ComfyUI as a backend service only, the API, and the admin frontend. `Stop all` stops the VibeVision API, admin frontend, and ComfyUI listeners; Ollama is monitored but left running because it may be shared by other local tools. Uncheck the exit option if you want the VibeVision services to keep running after closing the monitor.
+
+If your local ComfyUI still runs on its standard port, change only `COMFYUI_PORT` in `config/vibevision.env`.
 
 ## Local Services
 
 Configured local defaults:
 
-- Ollama: `http://localhost:18743`
-- ComfyUI: `http://localhost:18744`
-- API: `http://localhost:18741`
+- Ollama: `http://localhost:11434`
+- ComfyUI: `http://localhost:8401`
+- API: `http://localhost:18751`
 - Frontend: `http://localhost:18742`
 
+Default Ollama model:
+
+```powershell
+ollama pull huihui_ai/qwen3.5-abliterated:9b
+```
+
 The backend ships with SQLite for local development. Use `DATABASE_URL` to point at Postgres when moving toward production.
+
+## Telegram MVP Loop
+
+The `/api/telegram/webhook` endpoint now accepts Telegram updates and schedules background processing:
+
+1. Parse Telegram text, caption, image, document, video, or animation messages.
+2. Resolve uploaded media with Telegram `getFile`.
+3. Classify intent with local Ollama; image inputs are sent to the VLM when available, with fallback routing if Ollama is unavailable.
+4. Reserve credits and submit the selected workflow to ComfyUI.
+5. Poll ComfyUI history until outputs appear or the configured timeout is reached.
+6. Upload generated media back to the Telegram chat and update task status.
+
+Set `TELEGRAM_BOT_TOKEN` in ignored `config/vibevision.local.env`, then expose the API with your preferred tunnel and register:
+
+```powershell
+$token = "<bot-token>"
+$url = "https://your-public-domain.example/api/telegram/webhook"
+Invoke-RestMethod "https://api.telegram.org/bot$token/setWebhook" -Method Post -Body @{ url = $url }
+```
+
+For image or video generation to complete, ComfyUI must be reachable at the host and port configured in `config/vibevision.env`. This workspace is configured for the local ComfyUI folder `E:\ComfyUI_Feb` and port `8401`.
+
+The default `image.edit` route is wired to `backend/app/workflow_templates/flux2klein_single_edit_api.json`, converted from `Flux2Klein_SingleEdit.json`. It expects the matching ComfyUI custom nodes and model files:
+
+- `flux-2-klein-9b.safetensors`
+- `qwen_3_8b.safetensors`
+- `flux2-vae.safetensors`

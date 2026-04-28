@@ -65,6 +65,8 @@ class GenerationTaskRead(BaseModel):
     credit_cost: int
     error_message: str | None
     external_job_id: str | None
+    telegram_chat_id: str | None
+    telegram_message_id: str | None
     created_at: datetime
     updated_at: datetime
 
@@ -77,6 +79,8 @@ class BotMessageRequest(BaseModel):
     display_name: str | None = None
     text: str | None = None
     source_media_url: str | None = None
+    telegram_chat_id: str | None = None
+    telegram_message_id: str | None = None
 
 
 class BotMessageResponse(BaseModel):
@@ -95,3 +99,30 @@ class DashboardStats(BaseModel):
     running_tasks: int
     completed_tasks: int
     credits_spent: int
+
+
+class ServiceStatus(BaseModel):
+    key: str
+    name: str
+    status: str
+    url: str | None = None
+    port: int | None = None
+    pid: int | None = None
+    process_name: str | None = None
+    detail: str | None = None
+    latency_ms: int | None = None
+    can_start: bool = False
+    can_stop: bool = False
+
+
+class ServiceOverview(BaseModel):
+    services: list[ServiceStatus]
+    queue_running: int = 0
+    queue_pending: int = 0
+
+
+class ServiceActionResponse(BaseModel):
+    service: str
+    action: str
+    ok: bool
+    message: str
