@@ -5,6 +5,7 @@ from app.core.config import Settings, get_settings
 from app.db.session import get_db
 from app.schemas import BotMessageRequest, BotMessageResponse
 from app.services.credits import InsufficientCreditsError
+from app.services.error_details import append_error_detail
 from app.services.orchestrator import GenerationOrchestrator, WorkflowUnavailableError
 from app.services.task_runner import process_telegram_update
 
@@ -31,7 +32,14 @@ async def submit_bot_message(
         kind=task.kind,
         credit_cost=task.credit_cost,
         remaining_credits=task.user.credit_balance,
-        message="Task accepted." if not task.error_message else "Task created but dispatch failed.",
+        message=(
+            "Task accepted."
+            if not task.error_message
+            else append_error_detail(
+                "Task created but dispatch failed.",
+                task.error_message,
+            )
+        ),
     )
 
 

@@ -36,18 +36,25 @@ def _ensure_sqlite_columns() -> None:
         return
 
     inspector = inspect(engine)
-    if "generation_tasks" not in inspector.get_table_names():
-        return
-
-    existing_columns = {column["name"] for column in inspector.get_columns("generation_tasks")}
-    required_columns = {
-        "telegram_chat_id": "VARCHAR(64)",
-        "telegram_message_id": "VARCHAR(64)",
+    existing_tables = set(inspector.get_table_names())
+    required_columns_by_table = {
+        "generation_tasks": {
+            "telegram_chat_id": "VARCHAR(64)",
+            "telegram_message_id": "VARCHAR(64)",
+        },
+        "users": {
+            "is_admin": "BOOLEAN NOT NULL DEFAULT 0",
+            "is_hidden": "BOOLEAN NOT NULL DEFAULT 0",
+        },
     }
 
     with engine.begin() as connection:
-        for column_name, column_type in required_columns.items():
-            if column_name not in existing_columns:
-                connection.execute(
-                    text(f"ALTER TABLE generation_tasks ADD COLUMN {column_name} {column_type}")
-                )
+        for table_name, required_columns in required_columns_by_table.items():
+            if table_name not in existing_tables:
+                continue
+            existing_columns = {column["name"] for column in inspector.get_columns(table_name)}
+            for column_name, column_type in required_columns.items():
+                if column_name not in existing_columns:
+                    connection.execute(
+                        text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
+                    )

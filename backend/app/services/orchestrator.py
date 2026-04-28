@@ -6,6 +6,7 @@ from app.models import GenerationTask, LedgerReason, TaskStatus, User, Workflow
 from app.schemas import BotMessageRequest
 from app.services.comfyui import ComfyUIClient
 from app.services.credits import adjust_credits, reserve_for_task
+from app.services.error_details import format_exception_details
 from app.services.intent import IntentService
 
 
@@ -53,7 +54,7 @@ class GenerationOrchestrator:
             task.status = TaskStatus.running
         except Exception as exc:
             task.status = TaskStatus.failed
-            task.error_message = str(exc)
+            task.error_message = format_exception_details(exc)
             adjust_credits(
                 db=db,
                 user=user,
@@ -70,6 +71,10 @@ class GenerationOrchestrator:
 
     def _get_or_create_user(self, db: Session, payload: BotMessageRequest) -> User:
         user = db.scalar(select(User).where(User.telegram_id == payload.telegram_id))
+        if not user and payload.username:
+            user = db.scalar(select(User).where(User.username == payload.username, User.telegram_id.is_(None)))
+            if user:
+                user.telegram_id = payload.telegram_id
         if user:
             if payload.username:
                 user.username = payload.username

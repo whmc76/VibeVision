@@ -1,5 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from app.core.config import get_settings
@@ -31,9 +31,16 @@ router = APIRouter(prefix="/admin", tags=["admin"])
 
 @router.get("/stats", response_model=DashboardStats)
 def dashboard_stats(db: Session = Depends(get_db)) -> DashboardStats:
-    total_users = db.scalar(select(func.count()).select_from(User)) or 0
+    total_users = (
+        db.scalar(select(func.count()).select_from(User).where(User.is_hidden.is_(False))) or 0
+    )
     active_users = (
-        db.scalar(select(func.count()).select_from(User).where(User.status == UserStatus.active)) or 0
+        db.scalar(
+            select(func.count())
+            .select_from(User)
+            .where(User.status == UserStatus.active, User.is_hidden.is_(False))
+        )
+        or 0
     )
     queued_tasks = (
         db.scalar(
@@ -72,15 +79,19 @@ def list_users(
     query: str | None = None,
     limit: int = Query(default=50, ge=1, le=200),
 ) -> list[User]:
-    statement = select(User).order_by(User.created_at.desc()).limit(limit)
+    statement = select(User)
     if query:
         like = f"%{query}%"
-        statement = (
-            select(User)
-            .where(User.username.ilike(like) | User.display_name.ilike(like) | User.telegram_id.ilike(like))
-            .order_by(User.created_at.desc())
-            .limit(limit)
+        statement = statement.where(
+            or_(
+                User.username.ilike(like),
+                User.display_name.ilike(like),
+                User.telegram_id.ilike(like),
+            )
         )
+    else:
+        statement = statement.where(User.is_hidden.is_(False))
+    statement = statement.order_by(User.created_at.desc()).limit(limit)
     return list(db.scalars(statement))
 
 

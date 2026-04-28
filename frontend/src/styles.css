@@ -371,6 +371,8 @@ h2 {
   font-size: 13px;
   max-width: 360px;
   text-align: right;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .user-table {
@@ -530,6 +532,12 @@ h2 {
   gap: 9px;
 }
 
+.inline-badges {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
 .control-label {
   font-size: 13px;
   font-weight: 700;
@@ -608,6 +616,7 @@ h2 {
   min-height: 58px;
   padding: 10px 0;
   border-bottom: 1px solid #ece6dc;
+  align-items: flex-start;
 }
 
 .task-item:last-child {
@@ -627,6 +636,32 @@ h2 {
 .task-item span {
   max-width: 210px;
   font-size: 13px;
+}
+
+.task-copy {
+  display: grid;
+  gap: 4px;
+  margin-right: auto;
+}
+
+.task-summary {
+  max-width: none;
+  white-space: normal;
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.task-error {
+  display: block;
+  padding: 9px 10px;
+  border-radius: 6px;
+  background: #fff1ee;
+  color: #8d2923;
+  font-size: 12px;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 .workflow-grid {

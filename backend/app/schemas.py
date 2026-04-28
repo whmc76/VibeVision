@@ -12,6 +12,8 @@ class UserRead(BaseModel):
     display_name: str | None
     status: UserStatus
     membership_tier: MembershipTier
+    is_admin: bool
+    is_hidden: bool
     credit_balance: int
     total_spent_credits: int
     created_at: datetime
@@ -25,6 +27,8 @@ class UserCreate(BaseModel):
     username: str | None = None
     display_name: str | None = None
     membership_tier: MembershipTier = MembershipTier.free
+    is_admin: bool = False
+    is_hidden: bool = False
     credit_balance: int = 50
 
 
@@ -32,6 +36,8 @@ class UserUpdate(BaseModel):
     status: UserStatus | None = None
     membership_tier: MembershipTier | None = None
     display_name: str | None = None
+    is_admin: bool | None = None
+    is_hidden: bool | None = None
 
 
 class CreditAdjustment(BaseModel):

@@ -8,6 +8,7 @@ import httpx
 
 from app.core.config import Settings
 from app.schemas import ServiceActionResponse, ServiceOverview, ServiceStatus
+from app.services.error_details import format_exception_details
 
 
 class ServiceMonitor:
@@ -244,7 +245,7 @@ class ServiceMonitor:
                 port=port,
                 pid=pid,
                 process_name=self._process_name_for_pid(pid),
-                detail=f"{detail_offline} {exc}",
+                detail=f"{detail_offline} {format_exception_details(exc)}",
             )
 
     async def _comfyui_queue_counts(self) -> tuple[int, int]:

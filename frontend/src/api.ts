@@ -22,11 +22,27 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   });
 
   if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(detail || `Request failed with ${response.status}`);
+    const detail = await readErrorDetail(response);
+    throw new Error(
+      `Request failed (${response.status}${response.statusText ? ` ${response.statusText}` : ""}): ${detail}`,
+    );
   }
 
   return response.json() as Promise<T>;
+}
+
+async function readErrorDetail(response: Response): Promise<string> {
+  const raw = (await response.text()).trim();
+  if (!raw) {
+    return "No error detail returned by the server.";
+  }
+
+  try {
+    const payload = JSON.parse(raw) as Record<string, unknown>;
+    return typeof payload.detail === "string" && payload.detail.trim() ? payload.detail : raw;
+  } catch {
+    return raw;
+  }
 }
 
 export async function getStats(): Promise<DashboardStats> {

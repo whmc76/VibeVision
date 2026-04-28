@@ -78,6 +78,7 @@ const serviceIcons: Record<string, typeof Server> = {
 const taskIcons: Record<TaskKind, typeof Image> = {
   "image.generate": Image,
   "image.edit": WandSparkles,
+  "video.text_to_video": Film,
   "video.image_to_video": Film,
   "prompt.expand": Sparkles,
 };
@@ -336,7 +337,7 @@ function App() {
                       <small>@{user.username ?? user.telegram_id ?? "unknown"}</small>
                     </span>
                   </span>
-                  <span>{tierLabels[user.membership_tier]}</span>
+                  <span>{getUserGroupLabel(user)}</span>
                   <span>{formatNumber(user.credit_balance)}</span>
                   <span>
                     <Badge tone={statusTone[user.status]}>{user.status}</Badge>
@@ -365,6 +366,16 @@ function App() {
                   <strong>{formatNumber(selectedUser.credit_balance)}</strong>
                   <small>{formatNumber(selectedUser.total_spent_credits)} spent lifetime</small>
                 </div>
+
+                {selectedUser.is_admin || selectedUser.is_hidden ? (
+                  <div className="control-group">
+                    <span className="control-label">Role</span>
+                    <div className="inline-badges">
+                      {selectedUser.is_admin ? <Badge tone="blue">Admin</Badge> : null}
+                      {selectedUser.is_hidden ? <Badge tone="neutral">Hidden</Badge> : null}
+                    </div>
+                  </div>
+                ) : null}
 
                 <div className="control-group">
                   <span className="control-label">Membership</span>
@@ -472,9 +483,10 @@ function TaskItem({ task }: { task: GenerationTask }) {
   return (
     <article className="task-item">
       <Icon size={18} />
-      <div>
+      <div className="task-copy">
         <strong>{task.kind}</strong>
-        <span>{task.interpreted_prompt ?? task.original_text ?? "No prompt"}</span>
+        <span className="task-summary">{task.interpreted_prompt ?? task.original_text ?? "No prompt"}</span>
+        {task.error_message ? <code className="task-error">{task.error_message}</code> : null}
       </div>
       <Badge tone={statusTone[task.status]}>{task.status}</Badge>
     </article>
@@ -591,6 +603,19 @@ function Badge({ children, tone }: { children: ReactNode; tone: string }) {
 
 function StatusDot({ tone }: { tone: string }) {
   return <span className={`status-dot ${tone}`} />;
+}
+
+function getUserGroupLabel(user: User) {
+  if (user.is_admin && user.is_hidden) {
+    return "Hidden Admin";
+  }
+  if (user.is_admin) {
+    return "Admin";
+  }
+  if (user.is_hidden) {
+    return "Hidden User";
+  }
+  return tierLabels[user.membership_tier];
 }
 
 function formatNumber(value: number) {

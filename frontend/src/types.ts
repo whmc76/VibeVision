@@ -3,6 +3,7 @@ export type MembershipTier = "free" | "starter" | "pro" | "studio";
 export type TaskKind =
   | "image.generate"
   | "image.edit"
+  | "video.text_to_video"
   | "video.image_to_video"
   | "prompt.expand";
 export type TaskStatus = "queued" | "running" | "completed" | "failed" | "cancelled";
@@ -14,6 +15,8 @@ export interface User {
   display_name: string | null;
   status: UserStatus;
   membership_tier: MembershipTier;
+  is_admin: boolean;
+  is_hidden: boolean;
   credit_balance: number;
   total_spent_credits: number;
   created_at: string;

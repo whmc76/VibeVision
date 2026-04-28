@@ -23,6 +23,7 @@ class MembershipTier(StrEnum):
 class TaskKind(StrEnum):
     image_generate = "image.generate"
     image_edit = "image.edit"
+    video_text_to_video = "video.text_to_video"
     video_image_to_video = "video.image_to_video"
     prompt_expand = "prompt.expand"
 
@@ -53,6 +54,8 @@ class User(Base):
     membership_tier: Mapped[MembershipTier] = mapped_column(
         Enum(MembershipTier), default=MembershipTier.free
     )
+    is_admin: Mapped[bool] = mapped_column(default=False)
+    is_hidden: Mapped[bool] = mapped_column(default=False)
     credit_balance: Mapped[int] = mapped_column(Integer, default=50)
     total_spent_credits: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

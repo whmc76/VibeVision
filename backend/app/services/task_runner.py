@@ -6,6 +6,7 @@ from app.models import GenerationTask, LedgerReason, TaskStatus
 from app.schemas import BotMessageRequest
 from app.services.comfyui import ComfyUIClient
 from app.services.credits import adjust_credits
+from app.services.error_details import append_error_detail, format_exception_details
 from app.services.orchestrator import GenerationOrchestrator, WorkflowUnavailableError
 from app.services.telegram import TelegramClient, TelegramUpdateError
 
@@ -49,10 +50,29 @@ async def process_telegram_update(update: dict, settings: Settings) -> None:
         try:
             task = await GenerationOrchestrator(settings).handle_bot_message(db, payload)
         except WorkflowUnavailableError as exc:
-            await telegram.send_message(inbound.chat_id, f"没有可用工作流：{exc}", inbound.message_id)
+            await telegram.send_message(
+                inbound.chat_id,
+                append_error_detail("没有可用工作流。", str(exc), label="详细信息"),
+                inbound.message_id,
+            )
             return
         except ValueError as exc:
-            await telegram.send_message(inbound.chat_id, str(exc), inbound.message_id)
+            await telegram.send_message(
+                inbound.chat_id,
+                append_error_detail("请求处理失败。", str(exc), label="详细信息"),
+                inbound.message_id,
+            )
+            return
+        except Exception as exc:
+            await telegram.send_message(
+                inbound.chat_id,
+                append_error_detail(
+                    "任务创建失败，请检查后端配置和工作流参数。",
+                    format_exception_details(exc),
+                    label="详细信息",
+                ),
+                inbound.message_id,
+            )
             return
 
         task_id = task.id
@@ -60,11 +80,16 @@ async def process_telegram_update(update: dict, settings: Settings) -> None:
         external_job_id = task.external_job_id
         kind = task.kind
         credit_cost = task.credit_cost
+        error_message = task.error_message
 
     if status == TaskStatus.failed or not external_job_id:
         await telegram.send_message(
             inbound.chat_id,
-            "任务创建失败，积分已退回。请稍后重试或检查 ComfyUI 服务。",
+            append_error_detail(
+                "任务创建失败，积分已退回。请检查 ComfyUI 服务和工作流参数。",
+                error_message,
+                label="详细信息",
+            ),
             inbound.message_id,
         )
         return
@@ -99,10 +124,11 @@ async def complete_comfyui_task(
     try:
         result_urls = await comfyui.wait_for_result(prompt_id)
     except Exception as exc:
+        detail = format_exception_details(exc)
         with SessionLocal() as db:
             task = _get_task(db, task_id)
             task.status = TaskStatus.failed
-            task.error_message = str(exc)
+            task.error_message = detail
             if task.user:
                 adjust_credits(
                     db=db,
@@ -116,7 +142,11 @@ async def complete_comfyui_task(
             db.commit()
         await telegram.send_message(
             chat_id,
-            "生成任务失败，积分已退回。请稍后重试或联系管理员检查 ComfyUI。",
+            append_error_detail(
+                "生成任务失败，积分已退回。请检查 ComfyUI 返回结果和节点输出。",
+                detail,
+                label="详细信息",
+            ),
             reply_to_message_id,
         )
         return
@@ -130,10 +160,14 @@ async def complete_comfyui_task(
 
     try:
         await telegram.send_result_media(chat_id, result_urls, kind, reply_to_message_id)
-    except Exception:
+    except Exception as exc:
         await telegram.send_message(
             chat_id,
-            "任务已完成，但结果回传到 Telegram 失败。管理员可在后台查看任务输出。",
+            append_error_detail(
+                "任务已完成，但结果回传到 Telegram 失败。管理员可在后台查看任务输出。",
+                format_exception_details(exc),
+                label="详细信息",
+            ),
             reply_to_message_id,
         )
 
