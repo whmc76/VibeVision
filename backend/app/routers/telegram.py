@@ -9,6 +9,7 @@ from app.services.error_details import append_error_detail
 from app.services.intent import TargetOutputRequiredError
 from app.services.orchestrator import GenerationOrchestrator, WorkflowUnavailableError
 from app.services.task_runner import process_telegram_update
+from app.services.telegram_update_queue import TelegramUpdateQueue
 
 router = APIRouter(prefix="/telegram", tags=["telegram"])
 
@@ -59,6 +60,17 @@ async def telegram_webhook(
 
     if not settings.telegram_bot_token:
         raise HTTPException(status_code=503, detail="TELEGRAM_BOT_TOKEN is not configured.")
+
+    update_queue = TelegramUpdateQueue(settings)
+    if update_queue.enabled:
+        try:
+            await update_queue.enqueue(update)
+        finally:
+            await update_queue.close()
+        return {
+            "ok": True,
+            "message": "Webhook queued.",
+        }
 
     background_tasks.add_task(process_telegram_update, update, settings)
     return {

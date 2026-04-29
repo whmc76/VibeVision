@@ -7,6 +7,7 @@ from types import TracebackType
 from app.core.config import ROOT_DIR, Settings, get_settings
 from app.services.task_runner import process_telegram_update
 from app.services.telegram import TelegramClient, TelegramUpdateError
+from app.services.telegram_update_queue import TelegramUpdateQueue
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +69,7 @@ class TelegramPoller:
         self.settings = settings
         self.telegram = TelegramClient(settings)
         self.max_workers = max(1, max_workers or settings.telegram_poller_max_workers)
+        self.update_queue = TelegramUpdateQueue(settings)
         self._semaphore = asyncio.Semaphore(self.max_workers)
         self._tasks: set[asyncio.Task[None]] = set()
 
@@ -78,6 +80,17 @@ class TelegramPoller:
             "Telegram webhook disabled; starting local getUpdates polling with %s workers.",
             self.max_workers,
         )
+        if self.update_queue.enabled:
+            logger.info(
+                "Telegram update Redis queue enabled: stream=%s group=%s workers=%s.",
+                self.settings.telegram_update_queue_stream,
+                self.settings.telegram_update_queue_group,
+                self.settings.telegram_update_queue_workers,
+            )
+            for worker_index in range(max(1, self.settings.telegram_update_queue_workers)):
+                task = asyncio.create_task(self._consume_queued_updates(f"poller-{worker_index}"))
+                self._tasks.add(task)
+                task.add_done_callback(self._tasks.discard)
 
         offset: int | None = None
         while True:
@@ -88,20 +101,74 @@ class TelegramPoller:
                 await asyncio.sleep(5)
                 continue
 
+            if self.update_queue.enabled:
+                for update in updates:
+                    update_id = update.get("update_id")
+                    if not isinstance(update_id, int):
+                        continue
+                    if not await self._handle_update(update):
+                        break
+                    offset = update_id + 1
+                continue
+
+            update_tasks: list[tuple[int, asyncio.Task[bool]]] = []
             for update in updates:
                 update_id = update.get("update_id")
-                if isinstance(update_id, int):
-                    offset = update_id + 1
+                if not isinstance(update_id, int):
+                    continue
+
                 task = asyncio.create_task(self._handle_update(update))
                 self._tasks.add(task)
                 task.add_done_callback(self._tasks.discard)
+                update_tasks.append((update_id, task))
 
-    async def _handle_update(self, update: dict) -> None:
+            if not update_tasks:
+                continue
+
+            results = await asyncio.gather(*(task for _update_id, task in update_tasks))
+            for (update_id, _task), handled in zip(update_tasks, results, strict=True):
+                if not handled:
+                    break
+                offset = update_id + 1
+
+    async def _handle_update(self, update: dict) -> bool:
+        if self.update_queue.enabled:
+            try:
+                await self.update_queue.enqueue(update)
+                return True
+            except Exception:
+                logger.exception("Telegram update queue enqueue failed.")
+                return False
+
         async with self._semaphore:
             try:
                 await process_telegram_update(update, self.settings)
+                return True
             except Exception:
                 logger.exception("Telegram update processing failed.")
+                return False
+
+    async def _consume_queued_updates(self, consumer_suffix: str) -> None:
+        consumer = f"{self.settings.telegram_update_queue_consumer_prefix}-{consumer_suffix}"
+        while True:
+            try:
+                queued = await self.update_queue.read(consumer)
+            except Exception:
+                logger.exception("Telegram update queue read failed for consumer %s.", consumer)
+                await asyncio.sleep(5)
+                continue
+            if queued is None:
+                continue
+            try:
+                await process_telegram_update(queued.update, self.settings)
+            except Exception:
+                logger.exception(
+                    "Telegram queued update processing failed for Redis message %s.",
+                    queued.message_id,
+                )
+                await asyncio.sleep(5)
+                continue
+            await self.update_queue.ack(queued.message_id)
 
 
 def main() -> None:

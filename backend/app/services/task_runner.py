@@ -1,6 +1,9 @@
 import asyncio
+import hashlib
+import logging
 import time
 from dataclasses import dataclass, replace
+from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -36,6 +39,8 @@ from app.services.orchestrator import (
 from app.services.telegram import TelegramClient, TelegramUpdateError
 from app.services.users import get_or_create_telegram_user
 
+logger = logging.getLogger(__name__)
+
 PENDING_SOURCE_MEDIA_URL = "telegram://pending-source-media"
 FOLLOWUP_SOURCE_MEDIA_TTL_SECONDS = 120.0
 FOLLOWUP_SOURCE_MEDIA_WAIT_SECONDS = 3.0
@@ -57,9 +62,19 @@ class _PendingInstruction:
     source_media: _PendingSourceMedia | None = None
 
 
+@dataclass
+class _RecentInboundMessage:
+    fingerprint: str
+    message_id: str
+    updated_at: float
+
+
 _pending_followup_lock = asyncio.Lock()
 _recent_source_media: dict[tuple[str, str], _PendingSourceMedia] = {}
 _pending_instructions: dict[tuple[str, str], _PendingInstruction] = {}
+_duplicate_message_lock = asyncio.Lock()
+_recent_inbound_messages: dict[tuple[str, str], _RecentInboundMessage] = {}
+_dedupe_redis_clients: dict[str, Any] = {}
 
 
 async def process_telegram_update(update: dict, settings: Settings) -> None:
@@ -75,6 +90,15 @@ async def process_telegram_update(update: dict, settings: Settings) -> None:
     try:
         inbound = telegram.parse_message(update)
     except TelegramUpdateError:
+        return
+
+    if await _is_consecutive_duplicate_message(inbound, settings):
+        logger.info(
+            "telegram_duplicate_message_skipped chat_id=%s telegram_id=%s message_id=%s",
+            inbound.chat_id,
+            inbound.telegram_id,
+            inbound.message_id,
+        )
         return
 
     command_arguments = extract_bot_command_arguments(inbound.text)
@@ -700,3 +724,115 @@ async def _clear_pending_followup_state_for_tests() -> None:
     async with _pending_followup_lock:
         _recent_source_media.clear()
         _pending_instructions.clear()
+    async with _duplicate_message_lock:
+        _recent_inbound_messages.clear()
+
+
+async def _is_consecutive_duplicate_message(
+    inbound,
+    settings: Settings,
+) -> bool:
+    fingerprint = _inbound_message_fingerprint(inbound)
+    if not fingerprint:
+        return False
+    if settings.telegram_update_queue_url:
+        try:
+            return await _is_redis_consecutive_duplicate_message(
+                inbound,
+                fingerprint,
+                settings,
+            )
+        except Exception:
+            logger.exception("Redis Telegram duplicate check failed; falling back to memory.")
+
+    now = time.monotonic()
+    window_seconds = max(0, settings.telegram_duplicate_message_window_seconds)
+    key = _followup_key(inbound)
+    async with _duplicate_message_lock:
+        cutoff = now - window_seconds
+        for recent_key, recent in list(_recent_inbound_messages.items()):
+            if recent.updated_at < cutoff:
+                _recent_inbound_messages.pop(recent_key, None)
+
+        recent = _recent_inbound_messages.get(key)
+        is_duplicate = (
+            recent is not None
+            and recent.fingerprint == fingerprint
+            and recent.message_id != inbound.message_id
+            and now - recent.updated_at <= window_seconds
+        )
+        _recent_inbound_messages[key] = _RecentInboundMessage(
+            fingerprint=fingerprint,
+            message_id=recent.message_id if is_duplicate and recent else inbound.message_id,
+            updated_at=now,
+        )
+        return is_duplicate
+
+
+async def _is_redis_consecutive_duplicate_message(
+    inbound,
+    fingerprint: str,
+    settings: Settings,
+) -> bool:
+    window_seconds = max(1, settings.telegram_duplicate_message_window_seconds)
+    redis = await _dedupe_redis_client(settings.telegram_update_queue_url)
+    key_hash = hashlib.sha256(f"{inbound.chat_id}\0{inbound.telegram_id}".encode()).hexdigest()
+    key = f"{settings.telegram_update_queue_stream}:dedupe:{key_hash}"
+    result = await redis.eval(
+        """
+local current = redis.call('GET', KEYS[1])
+local is_duplicate = 0
+if current then
+  local separator = string.find(current, '\n', 1, true)
+  local current_fingerprint = current
+  local current_message_id = ''
+  if separator then
+    current_fingerprint = string.sub(current, 1, separator - 1)
+    current_message_id = string.sub(current, separator + 1)
+  end
+  if current_fingerprint == ARGV[1] and current_message_id ~= ARGV[2] then
+    is_duplicate = 1
+  end
+end
+if is_duplicate == 1 then
+  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
+else
+  redis.call('SET', KEYS[1], ARGV[1] .. '\n' .. ARGV[2], 'EX', tonumber(ARGV[3]))
+end
+return is_duplicate
+        """,
+        1,
+        key,
+        fingerprint,
+        inbound.message_id,
+        window_seconds,
+    )
+    return int(result) == 1
+
+
+async def _dedupe_redis_client(redis_url: str) -> Any:
+    client = _dedupe_redis_clients.get(redis_url)
+    if client is not None:
+        return client
+
+    from redis import asyncio as redis
+
+    client = redis.from_url(redis_url, decode_responses=True)
+    _dedupe_redis_clients[redis_url] = client
+    return client
+
+
+def _inbound_message_fingerprint(inbound) -> str | None:
+    normalized_text = " ".join((inbound.text or "").strip().lower().split())
+    source_media = inbound.source_file_id or ""
+    source_media_type = inbound.source_media_type or ""
+    if not normalized_text and not source_media:
+        return None
+    raw_fingerprint = "\n".join(
+        [
+            f"text={normalized_text}",
+            f"source_media_type={source_media_type}",
+            f"source_file_id={source_media}",
+        ]
+    )
+    return hashlib.sha256(raw_fingerprint.encode()).hexdigest()

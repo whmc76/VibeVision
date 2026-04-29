@@ -193,6 +193,8 @@ The `/api/telegram/webhook` endpoint is still available when you explicitly want
 
 Set `TELEGRAM_BOT_TOKEN` in ignored `config/vibevision.local.env`.
 
+Optional durable inbox: set `TELEGRAM_UPDATE_QUEUE_URL=redis://127.0.0.1:6379/0` to make incoming Telegram updates land in a Redis Stream before they are processed. The local poller then advances the Telegram offset after Redis accepts the update, and queue consumers ack Redis only after processing succeeds, so reconnects can continue pending messages. `TELEGRAM_UPDATE_QUEUE_WORKERS` defaults to `1` to preserve conversational ordering, `TELEGRAM_UPDATE_QUEUE_MAXLEN` bounds retained stream entries, and `TELEGRAM_DUPLICATE_MESSAGE_WINDOW_SECONDS` suppresses short-window consecutive duplicate messages from the same chat/user.
+
 Webhook mode is optional. If you need it, expose the API with your preferred tunnel and register:
 
 ```powershell

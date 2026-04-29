@@ -53,6 +53,10 @@ def test_settings_default_concurrency_limits_are_serial_for_ollama_and_comfyui()
     assert settings.comfyui_max_concurrency == 1
     assert settings.gpu_idle_release_seconds == 5
     assert settings.telegram_poller_max_workers == 4
+    assert settings.telegram_update_queue_url == ""
+    assert settings.telegram_update_queue_workers == 1
+    assert settings.telegram_update_queue_maxlen == 100_000
+    assert settings.telegram_duplicate_message_window_seconds == 45
 
 
 def test_settings_supports_minimax_mcp_vision_provider() -> None:

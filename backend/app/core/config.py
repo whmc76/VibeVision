@@ -47,6 +47,14 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_webhook_secret: str = Field(default="", repr=False)
     telegram_poller_max_workers: int = 4
+    telegram_update_queue_url: str = Field(default="", repr=False)
+    telegram_update_queue_stream: str = "vibevision:telegram:updates"
+    telegram_update_queue_group: str = "vibevision"
+    telegram_update_queue_consumer_prefix: str = "local"
+    telegram_update_queue_workers: int = 1
+    telegram_update_queue_maxlen: int = 100_000
+    telegram_update_queue_block_ms: int = 5_000
+    telegram_duplicate_message_window_seconds: int = 45
     comfyui_poll_interval_seconds: int = 3
     comfyui_poll_timeout_seconds: int = 600
 

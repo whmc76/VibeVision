@@ -1,10 +1,12 @@
 import asyncio
 
+from app.core.config import Settings
 from app.models import TaskKind
 from app.services.intent import TargetOutput
 from app.services.task_runner import (
     _attach_source_media_to_pending_instruction,
     _clear_pending_followup_state_for_tests,
+    _is_consecutive_duplicate_message,
     _parse_generation_request,
     _remember_recent_source_media,
     _resolve_followup_source_media,
@@ -104,6 +106,48 @@ def test_followup_source_media_can_arrive_after_instruction() -> None:
         assert attached is True
         assert resolved.source_file_id == "photo-file"
         assert resolved.source_media_type == "image"
+
+    asyncio.run(scenario())
+
+
+def test_consecutive_duplicate_message_is_skipped() -> None:
+    async def scenario() -> None:
+        await _clear_pending_followup_state_for_tests()
+        settings = Settings(telegram_duplicate_message_window_seconds=45)
+
+        assert (
+            await _is_consecutive_duplicate_message(
+                _inbound_message(message_id="10", text="生图   赛博朋克女孩"),
+                settings,
+            )
+            is False
+        )
+        assert (
+            await _is_consecutive_duplicate_message(
+                _inbound_message(message_id="11", text="生图 赛博朋克女孩"),
+                settings,
+            )
+            is True
+        )
+        assert (
+            await _is_consecutive_duplicate_message(
+                _inbound_message(message_id="12", text="生图 赛博朋克城市"),
+                settings,
+            )
+            is False
+        )
+
+    asyncio.run(scenario())
+
+
+def test_same_message_id_redelivery_is_not_treated_as_anxious_repeat() -> None:
+    async def scenario() -> None:
+        await _clear_pending_followup_state_for_tests()
+        settings = Settings(telegram_duplicate_message_window_seconds=45)
+        inbound = _inbound_message(message_id="10", text="生图 赛博朋克女孩")
+
+        assert await _is_consecutive_duplicate_message(inbound, settings) is False
+        assert await _is_consecutive_duplicate_message(inbound, settings) is False
 
     asyncio.run(scenario())
 
