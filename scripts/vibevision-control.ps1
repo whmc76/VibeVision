@@ -400,7 +400,7 @@ function Get-ServiceRows {
     if ($UsesOllama) {
       New-ServiceRow -Name "Ollama" -Status $(if ($OllamaPid) { "online" } else { "offline" }) -Port $OllamaPort -ProcessIdValue $OllamaPid -Url $OllamaUrl -Detail (Get-OllamaModelDisplay)
     }
-    New-ServiceRow -Name "Telegram" -Status $Telegram.Status -Port $ApiPort -ProcessIdValue $(if ($Telegram.Pid) { $Telegram.Pid } else { $ApiPid }) -Url $Telegram.Url -Detail $Telegram.Detail
+    New-ServiceRow -Name "Telegram" -Status $Telegram.Status -Port $ApiPort -ProcessIdValue $Telegram.Pid -Url $Telegram.Url -Detail $Telegram.Detail
   )
 }
 

@@ -30,56 +30,76 @@ function Import-VibeVisionConfig {
   }
 }
 
-function Test-VibeVisionCommandLine {
+function Test-ServiceCommandLine {
   param([string]$CommandLine)
 
   if (-not $CommandLine) {
     return $false
   }
 
-  $RootText = [string]$Root
-  if ($CommandLine -like "*$RootText*") {
-    return $true
-  }
-  if ($CommandLine -like "*app.services.telegram_poller*") {
-    return $true
-  }
-  if ($CommandLine -like "*uvicorn*app.main:app*") {
-    return $true
-  }
-  if ($env:COMFYUI_ROOT -and $CommandLine -like "*$($env:COMFYUI_ROOT)*") {
-    return $true
-  }
-  if ($CommandLine -like "*run_nvidia_gpu.bat*" -or $CommandLine -like "*ComfyUI\main.py*") {
-    return $true
-  }
-  return $false
+  return (
+    $CommandLine -like "*app.services.telegram_poller*" -or
+    $CommandLine -like "*app.services.task_queue_worker*" -or
+    $CommandLine -like "*start-telegram-poller.ps1*" -or
+    $CommandLine -like "*start-task-worker.ps1*" -or
+    $CommandLine -like "*start-backend.ps1*" -or
+    $CommandLine -like "*start-frontend.ps1*" -or
+    $CommandLine -like "*uvicorn*app.main:app*" -or
+    $CommandLine -like "*npm*run*dev*" -or
+    $CommandLine -like "*node*vite*"
+  )
 }
 
-function Stop-ProcessTree {
+function Get-ProcessSnapshot {
+  $Snapshot = @{}
+  foreach ($Process in (Get-CimInstance Win32_Process -ErrorAction SilentlyContinue)) {
+    $Snapshot[[int]$Process.ProcessId] = $Process
+  }
+  return $Snapshot
+}
+
+function Stop-ProcessId {
   param(
     [int]$ProcessId,
-    [string]$Label,
-    [bool]$TrustedRoot = $false
+    [string]$Label
   )
 
-  $Process = Get-CimInstance Win32_Process -Filter "ProcessId=$ProcessId" -ErrorAction SilentlyContinue
-  if (-not $Process) {
+  if (-not (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) {
     return
   }
 
-  $Trusted = $TrustedRoot -or (Test-VibeVisionCommandLine -CommandLine $Process.CommandLine)
-  $Children = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-    Where-Object { $_.ParentProcessId -eq $ProcessId }
-
-  foreach ($Child in $Children) {
-    if ($Trusted -or (Test-VibeVisionCommandLine -CommandLine $Child.CommandLine)) {
-      Stop-ProcessTree -ProcessId ([int]$Child.ProcessId) -Label $Label -TrustedRoot $Trusted
-    }
-  }
-
   Write-Host "Stopping $Label, PID $ProcessId."
-  Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+  & cmd.exe /d /c "taskkill.exe /PID $ProcessId /T /F >NUL 2>NUL"
+  if ($LASTEXITCODE -ne 0 -and (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) {
+    Stop-Process -Id $ProcessId -Force -ErrorAction SilentlyContinue
+  }
+}
+
+function Stop-ParentServices {
+  param(
+    [int]$ProcessId,
+    [hashtable]$Snapshot,
+    [string]$Label
+  )
+
+  $Seen = @{}
+  $CurrentId = $ProcessId
+  while ($Snapshot.ContainsKey($CurrentId)) {
+    $Process = $Snapshot[$CurrentId]
+    $ParentId = [int]$Process.ParentProcessId
+    if (-not $Snapshot.ContainsKey($ParentId) -or $Seen.ContainsKey($ParentId)) {
+      return
+    }
+
+    $Parent = $Snapshot[$ParentId]
+    if (-not (Test-ServiceCommandLine -CommandLine $Parent.CommandLine)) {
+      return
+    }
+
+    $Seen[$ParentId] = $true
+    Stop-ProcessId -ProcessId $ParentId -Label $Label
+    $CurrentId = $ParentId
+  }
 }
 
 function Stop-Listener {
@@ -89,37 +109,49 @@ function Stop-Listener {
   )
 
   $Connections = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
+  $Snapshot = Get-ProcessSnapshot
   foreach ($Connection in $Connections) {
-    $Process = Get-CimInstance Win32_Process -Filter "ProcessId=$($Connection.OwningProcess)" -ErrorAction SilentlyContinue
-    Stop-ProcessTree -ProcessId ([int]$Connection.OwningProcess) -Label "$Label on port $Port"
-    if ($Process.ParentProcessId) {
-      $Parent = Get-CimInstance Win32_Process -Filter "ProcessId=$($Process.ParentProcessId)" -ErrorAction SilentlyContinue
-      if ($Parent.CommandLine -and ($Parent.CommandLine -like "*start-backend.ps1*" -or $Parent.CommandLine -like "*start-frontend.ps1*" -or $Parent.CommandLine -like "*run_nvidia_gpu*")) {
-        Stop-ProcessTree -ProcessId ([int]$Parent.ProcessId) -Label "$Label launcher"
-      }
+    $ProcessId = [int]$Connection.OwningProcess
+    if ($Snapshot.ContainsKey($ProcessId) -and -not (Test-ServiceCommandLine -CommandLine $Snapshot[$ProcessId].CommandLine)) {
+      Write-Host "Skipping $Label on port $Port, PID $ProcessId does not look like a VibeVision service."
+      continue
     }
+    Stop-ProcessId -ProcessId $ProcessId -Label "$Label on port $Port"
+    Stop-ParentServices -ProcessId $ProcessId -Snapshot $Snapshot -Label "$Label launcher"
+  }
+}
+
+function Stop-MatchingProcesses {
+  param(
+    [string]$Pattern,
+    [string]$Label
+  )
+
+  $Snapshot = Get-ProcessSnapshot
+  $Processes = @(
+    $Snapshot.Values |
+      Where-Object { $_.CommandLine -and $_.CommandLine -like $Pattern } |
+      Sort-Object ProcessId -Descending
+  )
+  foreach ($Process in $Processes) {
+    Stop-ProcessId -ProcessId ([int]$Process.ProcessId) -Label $Label
+    Stop-ParentServices -ProcessId ([int]$Process.ProcessId) -Snapshot $Snapshot -Label "$Label launcher"
   }
 }
 
 function Stop-TelegramPoller {
-  $Processes = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -and $_.CommandLine -like "*app.services.telegram_poller*" }
+  Stop-MatchingProcesses -Pattern "*app.services.telegram_poller*" -Label "Telegram local poller"
+}
 
-  foreach ($Process in $Processes) {
-    Stop-ProcessTree -ProcessId ([int]$Process.ProcessId) -Label "Telegram local poller"
-    if ($Process.ParentProcessId) {
-      $Parent = Get-CimInstance Win32_Process -Filter "ProcessId=$($Process.ParentProcessId)" -ErrorAction SilentlyContinue
-      if ($Parent.CommandLine -and $Parent.CommandLine -like "*start-telegram-poller.ps1*") {
-        Stop-ProcessTree -ProcessId ([int]$Parent.ProcessId) -Label "Telegram local poller launcher"
-      }
-    }
-  }
+function Stop-TaskQueueWorker {
+  Stop-MatchingProcesses -Pattern "*app.services.task_queue_worker*" -Label "task queue worker"
 }
 
 Import-VibeVisionConfig -Path $ConfigPath
 Import-VibeVisionConfig -Path $LocalConfigPath
 
 Stop-TelegramPoller
+Stop-TaskQueueWorker
 Stop-Listener -Port ([int]$env:ADMIN_FRONTEND_PORT) -Label "admin frontend"
 Stop-Listener -Port ([int]$env:API_PORT) -Label "VibeVision API"
 
