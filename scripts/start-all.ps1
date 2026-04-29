@@ -48,7 +48,14 @@ Import-VibeVisionConfig -Path $LocalConfigPath
 Write-Host "Cleaning existing VibeVision service processes before start."
 & (Join-Path $Root "scripts\stop-all.ps1") -ConfigPath $ConfigPath -LocalConfigPath $LocalConfigPath
 
-if (-not (Test-PortListening -Port ([int]$env:OLLAMA_PORT))) {
+$LlmProvider = if ($env:LLM_PROVIDER) { $env:LLM_PROVIDER.Trim().ToLowerInvariant() } else { "ollama" }
+$LogicProvider = if ($env:LLM_LOGIC_PROVIDER) { $env:LLM_LOGIC_PROVIDER.Trim().ToLowerInvariant() } else { $LlmProvider }
+$PromptProvider = if ($env:LLM_PROMPT_PROVIDER) { $env:LLM_PROMPT_PROVIDER.Trim().ToLowerInvariant() } else { $LlmProvider }
+$NeedsOllama = $LogicProvider -eq "ollama" -or $PromptProvider -eq "ollama"
+
+if (-not $NeedsOllama) {
+  Write-Host "No LLM role uses Ollama; skipping Ollama start."
+} elseif (-not (Test-PortListening -Port ([int]$env:OLLAMA_PORT))) {
   $OllamaCommand = Get-Command "ollama" -ErrorAction SilentlyContinue
   if ($OllamaCommand) {
     Start-Process `

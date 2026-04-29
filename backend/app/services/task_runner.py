@@ -19,6 +19,7 @@ from app.services.bot_help import (
     resolve_quick_action,
 )
 from app.services.comfyui import ComfyUIClient
+from app.services.concurrency import concurrency_slot
 from app.services.credits import InsufficientCreditsError, refresh_daily_bonus, refund_task_credits
 from app.services.error_details import append_error_detail, format_exception_details
 from app.services.intent import TargetOutput, TargetOutputRequiredError
@@ -203,84 +204,104 @@ async def process_telegram_update(update: dict, settings: Settings) -> None:
         telegram_message_id=inbound.message_id,
     )
 
-    with SessionLocal() as db:
-        try:
-            task = await orchestrator.handle_bot_message(db, payload)
-        except WorkflowUnavailableError as exc:
-            await telegram.send_message(
-                inbound.chat_id,
-                append_error_detail("没有可用工作流。", str(exc), label="详细信息"),
-                inbound.message_id,
-            )
-            return
-        except TargetOutputRequiredError as exc:
-            await telegram.send_message(
-                inbound.chat_id,
-                str(exc),
-                inbound.message_id,
-            )
-            return
-        except InsufficientCreditsError as exc:
-            await telegram.send_message(
-                inbound.chat_id,
-                str(exc),
-                inbound.message_id,
-            )
-            return
-        except ValueError as exc:
-            await telegram.send_message(
-                inbound.chat_id,
-                append_error_detail("请求处理失败。", str(exc), label="详细信息"),
-                inbound.message_id,
-            )
-            return
-        except Exception as exc:
+    async with concurrency_slot("comfyui", settings.comfyui_max_concurrency):
+        with SessionLocal() as db:
+            try:
+                task = await orchestrator.handle_bot_message(db, payload)
+            except WorkflowUnavailableError as exc:
+                await telegram.send_message(
+                    inbound.chat_id,
+                    append_error_detail("没有可用工作流。", str(exc), label="详细信息"),
+                    inbound.message_id,
+                )
+                return
+            except TargetOutputRequiredError as exc:
+                await telegram.send_message(
+                    inbound.chat_id,
+                    str(exc),
+                    inbound.message_id,
+                )
+                return
+            except InsufficientCreditsError as exc:
+                await telegram.send_message(
+                    inbound.chat_id,
+                    str(exc),
+                    inbound.message_id,
+                )
+                return
+            except ValueError as exc:
+                await telegram.send_message(
+                    inbound.chat_id,
+                    append_error_detail("请求处理失败。", str(exc), label="详细信息"),
+                    inbound.message_id,
+                )
+                return
+            except Exception as exc:
+                await telegram.send_message(
+                    inbound.chat_id,
+                    append_error_detail(
+                        "任务创建失败，请检查后端配置和工作流参数。",
+                        format_exception_details(exc),
+                        label="详细信息",
+                    ),
+                    inbound.message_id,
+                )
+                return
+
+            status = task.status
+            external_job_id = task.external_job_id
+            kind = task.kind
+            credit_cost = task.credit_cost
+            error_message = task.error_message
+
+        if status == TaskStatus.failed or not external_job_id:
             await telegram.send_message(
                 inbound.chat_id,
                 append_error_detail(
-                    "任务创建失败，请检查后端配置和工作流参数。",
-                    format_exception_details(exc),
+                    "任务创建失败，积分已退回。请检查 ComfyUI 工作流配置。",
+                    error_message,
                     label="详细信息",
                 ),
                 inbound.message_id,
             )
             return
 
-        status = task.status
-        external_job_id = task.external_job_id
-        kind = task.kind
-        credit_cost = task.credit_cost
-        error_message = task.error_message
-
-    if status == TaskStatus.failed or not external_job_id:
         await telegram.send_message(
             inbound.chat_id,
-            append_error_detail(
-                "任务创建失败，积分已退回。请检查 ComfyUI 工作流配置。",
-                error_message,
-                label="详细信息",
-            ),
+            f"{_task_kind_label(kind)}已提交，实际消耗 {credit_cost} 积分。完成后会自动回传结果。",
             inbound.message_id,
         )
-        return
 
-    await telegram.send_message(
-        inbound.chat_id,
-        f"{_task_kind_label(kind)}已提交，实际消耗 {credit_cost} 积分。完成后会自动回传结果。",
-        inbound.message_id,
-    )
-
-    await complete_comfyui_task(
-        task_id=task.id,
-        prompt_id=external_job_id,
-        chat_id=inbound.chat_id,
-        reply_to_message_id=inbound.message_id,
-        kind=kind,
-        settings=settings,
-    )
+        await complete_comfyui_task(
+            task_id=task.id,
+            prompt_id=external_job_id,
+            chat_id=inbound.chat_id,
+            reply_to_message_id=inbound.message_id,
+            kind=kind,
+            settings=settings,
+        )
 
 
 async def complete_comfyui_task(
+    task_id: int,
+    prompt_id: str,
+    chat_id: str,
+    reply_to_message_id: str,
+    kind,
+    settings: Settings,
+) -> None:
+    async with concurrency_slot("comfyui", settings.comfyui_max_concurrency):
+        await _complete_comfyui_task_locked(
+            task_id=task_id,
+            prompt_id=prompt_id,
+            chat_id=chat_id,
+            reply_to_message_id=reply_to_message_id,
+            kind=kind,
+            settings=settings,
+        )
+
+
+async def _complete_comfyui_task_locked(
     task_id: int,
     prompt_id: str,
     chat_id: str,

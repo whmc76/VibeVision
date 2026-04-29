@@ -1,5 +1,6 @@
 import base64
 import json
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -9,6 +10,7 @@ import httpx
 
 from app.core.config import Settings
 from app.models import TaskKind, Workflow
+from app.services.concurrency import concurrency_slot
 
 
 class TargetOutput(StrEnum):
@@ -69,7 +71,12 @@ class IntentService:
         normalized_media_type = self.normalize_media_type(source_media_type)
         images = (
             await self._load_ollama_images(source_media_url)
-            if source_media_url and normalized_media_type != "video"
+            if (
+                self.settings.llm_logic_provider_name == "ollama"
+                or self.settings.llm_prompt_provider_name == "ollama"
+            )
+            and source_media_url
+            and normalized_media_type != "video"
             else []
         )
 
@@ -88,7 +95,7 @@ class IntentService:
             )
 
         try:
-            intent = await self._classify_with_ollama(
+            intent = await self._classify_with_llm(
                 text=content,
                 workflow_routes=workflow_routes,
                 media_attached=media_attached,
@@ -196,21 +203,104 @@ class IntentService:
         if not logic_model:
             raise ValueError("Ollama logic model is not configured.")
 
-        workflow_catalog = "\n".join(
-            (
-                f"- workflow_key={route.workflow_key}; kind={route.kind.value}; "
-                f"target_output={route.target_output.value if route.target_output else 'none'}; "
-                f"requires_source_media={str(route.requires_source_media).lower()}; "
-                f"credit_cost={route.credit_cost}; name={route.name}; description={route.description}"
-            )
-            for route in workflow_routes
+        payload: dict[str, Any] = {
+            "model": logic_model,
+            "stream": False,
+            "format": "json",
+            "prompt": self._router_user_prompt(
+                text=text,
+                workflow_routes=workflow_routes,
+                media_attached=media_attached,
+                source_media_type=source_media_type,
+                target_output=target_output,
+                vision_image_attached=bool(images),
+                include_system_prompt=True,
+            ),
+        }
+        if images:
+            payload["images"] = images
+
+        async with concurrency_slot("ollama", self.settings.ollama_max_concurrency):
+            async with httpx.AsyncClient(
+                base_url=self.settings.ollama_base_url,
+                timeout=20,
+                limits=self._single_connection_limits(),
+            ) as client:
+                response = await client.post("/api/generate", json=payload)
+                response.raise_for_status()
+                body = response.json()
+
+        data = self._loads_json_object(str(body.get("response") or "{}"))
+        return self._intent_result_from_router_data(
+            data=data,
+            text=text,
+            workflow_routes=workflow_routes,
+            media_attached=media_attached,
+            source_media_type=source_media_type,
+            target_output=target_output,
         )
-        system_prompt = (
+
+    async def _classify_with_minimax(
+        self,
+        text: str,
+        workflow_routes: Sequence[WorkflowRoute],
+        media_attached: bool,
+        source_media_type: str | None,
+        target_output: TargetOutput | None,
+    ) -> IntentResult:
+        logic_model = self.settings.minimax_logic_model_name
+        if not logic_model:
+            raise ValueError("MiniMax logic model is not configured.")
+        if not self.settings.minimax_api_key:
+            raise ValueError("MINIMAX_API_KEY is not configured.")
+
+        payload: dict[str, Any] = {
+            "model": logic_model,
+            "messages": [
+                {"role": "system", "content": self._router_system_prompt()},
+                {
+                    "role": "user",
+                    "content": self._router_user_prompt(
+                        text=text,
+                        workflow_routes=workflow_routes,
+                        media_attached=media_attached,
+                        source_media_type=source_media_type,
+                        target_output=target_output,
+                        vision_image_attached=False,
+                    ),
+                },
+            ],
+            "temperature": 0.1,
+            "max_tokens": 800,
+            "response_format": {"type": "json_object"},
+        }
+
+        async with httpx.AsyncClient(
+            base_url=self.settings.minimax_base_url,
+            headers=self._minimax_headers(),
+            timeout=self.settings.minimax_timeout_seconds,
+        ) as client:
+            response = await client.post("/chat/completions", json=payload)
+            response.raise_for_status()
+            body = response.json()
+
+        data = self._loads_json_object(self._chat_completion_content(body))
+        return self._intent_result_from_router_data(
+            data=data,
+            text=text,
+            workflow_routes=workflow_routes,
+            media_attached=media_attached,
+            source_media_type=source_media_type,
+            target_output=target_output,
+        )
+
+    def _router_system_prompt(self) -> str:
+        return (
             "You are VibeVision's workflow router. Choose exactly one workflow from the catalog, "
             "then draft a concise prompt brief and practical generation parameters. A separate "
             "prompt model will expand the final prompt later. Return compact JSON with keys "
             "workflow_key, prompt, parameters, confidence, reasoning. workflow_key must be copied "
-            "exactly from the catalog. Return JSON only.\n"
+            "exactly from the catalog. Return JSON only. Do not include thinking tags.\n"
             "Routing policy:\n"
             "1. Respect target_output. If target_output=image, choose image.generate or image.edit. "
             "If target_output=video, choose video.text_to_video or video.image_to_video.\n"
@@ -226,31 +316,50 @@ class IntentService:
             "duration_seconds, fps, motion_strength, seed, negative_prompt. Use only values that "
             "fit the selected workflow and the user's request."
         )
-        payload: dict[str, Any] = {
-            "model": logic_model,
-            "stream": False,
-            "format": "json",
-            "prompt": (
-                f"{system_prompt}\n\n"
-                f"workflow_catalog:\n{workflow_catalog}\n\n"
-                f"target_output={target_output.value if target_output else 'unspecified'}\n"
-                f"media_attached={media_attached}\n"
-                f"source_media_type={source_media_type or 'none'}\n"
-                f"vision_image_attached={bool(images)}\n"
-                f"user_request={text or 'No text request was provided.'}\n"
-                "JSON:"
-            ),
-        }
-        if images:
-            payload["images"] = images
 
-        async with httpx.AsyncClient(base_url=self.settings.ollama_base_url, timeout=20) as client:
-            response = await client.post("/api/generate", json=payload)
-            response.raise_for_status()
-            body = response.json()
+    def _router_user_prompt(
+        self,
+        *,
+        text: str,
+        workflow_routes: Sequence[WorkflowRoute],
+        media_attached: bool,
+        source_media_type: str | None,
+        target_output: TargetOutput | None,
+        vision_image_attached: bool,
+        include_system_prompt: bool = False,
+    ) -> str:
+        workflow_catalog = "\n".join(
+            (
+                f"- workflow_key={route.workflow_key}; kind={route.kind.value}; "
+                f"target_output={route.target_output.value if route.target_output else 'none'}; "
+                f"requires_source_media={str(route.requires_source_media).lower()}; "
+                f"credit_cost={route.credit_cost}; name={route.name}; description={route.description}"
+            )
+            for route in workflow_routes
+        )
+        prompt = (
+            f"workflow_catalog:\n{workflow_catalog}\n\n"
+            f"target_output={target_output.value if target_output else 'unspecified'}\n"
+            f"media_attached={media_attached}\n"
+            f"source_media_type={source_media_type or 'none'}\n"
+            f"vision_image_attached={vision_image_attached}\n"
+            f"user_request={text or 'No text request was provided.'}\n"
+            "JSON:"
+        )
+        if include_system_prompt:
+            return f"{self._router_system_prompt()}\n\n{prompt}"
+        return prompt
 
-        raw = body.get("response", "{}")
-        data = json.loads(raw)
+    def _intent_result_from_router_data(
+        self,
+        *,
+        data: dict[str, Any],
+        text: str,
+        workflow_routes: Sequence[WorkflowRoute],
+        media_attached: bool,
+        source_media_type: str | None,
+        target_output: TargetOutput | None,
+    ) -> IntentResult:
         workflow = self._resolve_workflow_choice(
             data,
             workflow_routes,
@@ -328,7 +437,7 @@ class IntentService:
             return base_prompt
 
         try:
-            enhanced_prompt = await self._enhance_prompt_with_ollama(
+            enhanced_prompt = await self._enhance_prompt_with_llm(
                 workflow=workflow,
                 user_text=user_text,
                 router_prompt=base_prompt,
@@ -339,6 +448,103 @@ class IntentService:
         except (httpx.HTTPError, ValueError):
             return base_prompt
         return self._limit_prompt_text(self._clean_prompt_text(enhanced_prompt)) or base_prompt
+
+    async def _classify_with_llm(
+        self,
+        text: str,
+        workflow_routes: Sequence[WorkflowRoute],
+        media_attached: bool,
+        source_media_type: str | None,
+        target_output: TargetOutput | None,
+        images: list[str],
+    ) -> IntentResult:
+        if self.settings.llm_logic_provider_name == "minimax":
+            return await self._classify_with_minimax(
+                text=text,
+                workflow_routes=workflow_routes,
+                media_attached=media_attached,
+                source_media_type=source_media_type,
+                target_output=target_output,
+            )
+        return await self._classify_with_ollama(
+            text=text,
+            workflow_routes=workflow_routes,
+            media_attached=media_attached,
+            source_media_type=source_media_type,
+            target_output=target_output,
+            images=images,
+        )
+
+    async def _enhance_prompt_with_llm(
+        self,
+        *,
+        workflow: WorkflowRoute,
+        user_text: str,
+        router_prompt: str,
+        media_attached: bool,
+        source_media_type: str | None,
+        images: list[str],
+    ) -> str:
+        if self.settings.llm_prompt_provider_name == "minimax":
+            return await self._enhance_prompt_with_minimax(
+                workflow=workflow,
+                user_text=user_text,
+                router_prompt=router_prompt,
+                media_attached=media_attached,
+                source_media_type=source_media_type,
+            )
+        return await self._enhance_prompt_with_ollama(
+            workflow=workflow,
+            user_text=user_text,
+            router_prompt=router_prompt,
+            media_attached=media_attached,
+            source_media_type=source_media_type,
+            images=images,
+        )
+
+    async def _enhance_prompt_with_minimax(
+        self,
+        *,
+        workflow: WorkflowRoute,
+        user_text: str,
+        router_prompt: str,
+        media_attached: bool,
+        source_media_type: str | None,
+    ) -> str:
+        prompt_model = self.settings.minimax_prompt_model_name
+        if not prompt_model:
+            raise ValueError("MiniMax prompt model is not configured.")
+        if not self.settings.minimax_api_key:
+            raise ValueError("MINIMAX_API_KEY is not configured.")
+
+        payload: dict[str, Any] = {
+            "model": prompt_model,
+            "messages": [
+                {"role": "system", "content": self._prompt_enhancement_system_prompt()},
+                {
+                    "role": "user",
+                    "content": self._prompt_enhancement_user_prompt(
+                        workflow=workflow,
+                        user_text=user_text,
+                        router_prompt=router_prompt,
+                        media_attached=media_attached,
+                        source_media_type=source_media_type,
+                    ),
+                },
+            ],
+            "temperature": 0.2,
+            "max_tokens": 320,
+        }
+
+        async with httpx.AsyncClient(
+            base_url=self.settings.minimax_base_url,
+            headers=self._minimax_headers(),
+            timeout=self.settings.minimax_timeout_seconds,
+        ) as client:
+            response = await client.post("/chat/completions", json=payload)
+            response.raise_for_status()
+            body = response.json()
+        return self._strip_thinking_text(self._chat_completion_content(body)).strip()
 
     async def _enhance_prompt_with_ollama(
         self,
@@ -354,7 +560,36 @@ class IntentService:
         if not prompt_model:
             raise ValueError("Ollama prompt model is not configured.")
 
-        system_prompt = (
+        payload: dict[str, Any] = {
+            "model": prompt_model,
+            "stream": False,
+            "prompt": (
+                f"{self._prompt_enhancement_system_prompt()}\n\n"
+                f"{self._prompt_enhancement_user_prompt(
+                    workflow=workflow,
+                    user_text=user_text,
+                    router_prompt=router_prompt,
+                    media_attached=media_attached,
+                    source_media_type=source_media_type,
+                )}"
+            ),
+        }
+        if images:
+            payload["images"] = images
+
+        async with concurrency_slot("ollama", self.settings.ollama_max_concurrency):
+            async with httpx.AsyncClient(
+                base_url=self.settings.ollama_base_url,
+                timeout=60,
+                limits=self._single_connection_limits(),
+            ) as client:
+                response = await client.post("/api/generate", json=payload)
+                response.raise_for_status()
+                body = response.json()
+        return self._strip_thinking_text(str(body.get("response") or "")).strip()
+
+    def _prompt_enhancement_system_prompt(self) -> str:
+        return (
             "You are VibeVision's controlled prompt enhancement model. Rewrite the user's request "
             "into a concise production prompt for the selected generation workflow.\n"
             "Rules:\n"
@@ -370,31 +605,74 @@ class IntentService:
             "camera moves, moods, or lighting unless requested.\n"
             "5. If workflow_note says English is required, write the final prompt in English even "
             "when the user request is in another language.\n"
-            "6. Return only the final prompt text. No bullets, no JSON, no explanation."
+            "6. Return only the final prompt text. No bullets, no JSON, no explanation, no thinking tags."
         )
-        payload: dict[str, Any] = {
-            "model": prompt_model,
-            "stream": False,
-            "prompt": (
-                f"{system_prompt}\n\n"
-                f"workflow_kind={workflow.kind.value}\n"
-                f"target_output={workflow.target_output.value if workflow.target_output else 'none'}\n"
-                f"media_attached={media_attached}\n"
-                f"source_media_type={source_media_type or 'none'}\n"
-                f"workflow_note={self._prompt_enhancement_note_for(workflow)}\n"
-                f"router_prompt_brief={self._clean_prompt_text(router_prompt) or 'none'}\n"
-                f"user_request={self._clean_prompt_text(user_text) or 'none'}\n"
-                "Final prompt:"
-            ),
-        }
-        if images:
-            payload["images"] = images
 
-        async with httpx.AsyncClient(base_url=self.settings.ollama_base_url, timeout=60) as client:
-            response = await client.post("/api/generate", json=payload)
-            response.raise_for_status()
-            body = response.json()
-        return str(body.get("response") or "").strip()
+    def _prompt_enhancement_user_prompt(
+        self,
+        *,
+        workflow: WorkflowRoute,
+        user_text: str,
+        router_prompt: str,
+        media_attached: bool,
+        source_media_type: str | None,
+    ) -> str:
+        return (
+            f"workflow_kind={workflow.kind.value}\n"
+            f"target_output={workflow.target_output.value if workflow.target_output else 'none'}\n"
+            f"media_attached={media_attached}\n"
+            f"source_media_type={source_media_type or 'none'}\n"
+            f"workflow_note={self._prompt_enhancement_note_for(workflow)}\n"
+            f"router_prompt_brief={self._clean_prompt_text(router_prompt) or 'none'}\n"
+            f"user_request={self._clean_prompt_text(user_text) or 'none'}\n"
+            "Final prompt:"
+        )
+
+    def _minimax_headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.settings.minimax_api_key}",
+            "Content-Type": "application/json",
+        }
+
+    def _single_connection_limits(self) -> httpx.Limits:
+        return httpx.Limits(max_connections=1, max_keepalive_connections=1)
+
+    def _chat_completion_content(self, body: dict[str, Any]) -> str:
+        choices = body.get("choices")
+        if not isinstance(choices, list) or not choices:
+            raise ValueError("MiniMax returned no chat completion choices.")
+        message = choices[0].get("message") if isinstance(choices[0], dict) else None
+        if not isinstance(message, dict):
+            raise ValueError("MiniMax returned an invalid chat completion message.")
+        content = message.get("content")
+        if isinstance(content, list):
+            return "".join(
+                str(part.get("text") or "")
+                for part in content
+                if isinstance(part, dict) and part.get("type") in {None, "text"}
+            )
+        return self._strip_thinking_text(str(content or ""))
+
+    def _loads_json_object(self, raw: str) -> dict[str, Any]:
+        cleaned = self._strip_thinking_text(raw).strip()
+        if cleaned.startswith("```"):
+            cleaned = cleaned.strip("`").strip()
+            if cleaned.lower().startswith("json"):
+                cleaned = cleaned[4:].strip()
+        try:
+            data = json.loads(cleaned)
+        except json.JSONDecodeError:
+            start = cleaned.find("{")
+            end = cleaned.rfind("}")
+            if start < 0 or end <= start:
+                raise
+            data = json.loads(cleaned[start : end + 1])
+        if not isinstance(data, dict):
+            raise ValueError("LLM returned JSON, but it was not an object.")
+        return data
+
+    def _strip_thinking_text(self, text: str) -> str:
+        return re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
 
     async def _load_ollama_images(self, source_media_url: str) -> list[str]:
         try:

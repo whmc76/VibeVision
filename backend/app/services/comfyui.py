@@ -9,6 +9,7 @@ import httpx
 
 from app.core.config import Settings
 from app.models import Workflow
+from app.services.concurrency import concurrency_slot
 
 
 class ComfyUIClient:
@@ -22,15 +23,20 @@ class ComfyUIClient:
         source_media_url: str | None,
         parameters: dict[str, Any] | None = None,
     ) -> str:
-        async with httpx.AsyncClient(base_url=self.settings.comfyui_base_url, timeout=30) as client:
-            source_image_name = None
-            if source_media_url and self._template_requires_source_image(workflow.template or {}):
-                source_image_name = await self._upload_source_image(client, source_media_url)
+        async with concurrency_slot("comfyui", self.settings.comfyui_max_concurrency):
+            async with httpx.AsyncClient(
+                base_url=self.settings.comfyui_base_url,
+                timeout=30,
+                limits=self._single_connection_limits(),
+            ) as client:
+                source_image_name = None
+                if source_media_url and self._template_requires_source_image(workflow.template or {}):
+                    source_image_name = await self._upload_source_image(client, source_media_url)
 
-            payload = self._build_payload(workflow, prompt, source_image_name, parameters or {})
-            response = await client.post("/prompt", json=payload)
-            response.raise_for_status()
-            data = response.json()
+                payload = self._build_payload(workflow, prompt, source_image_name, parameters or {})
+                response = await client.post("/prompt", json=payload)
+                response.raise_for_status()
+                data = response.json()
         return str(data.get("prompt_id") or data.get("id") or uuid4())
 
     def _build_payload(
@@ -137,18 +143,28 @@ class ComfyUIClient:
     async def wait_for_result(self, prompt_id: str) -> list[str]:
         deadline = asyncio.get_running_loop().time() + self.settings.comfyui_poll_timeout_seconds
 
-        async with httpx.AsyncClient(base_url=self.settings.comfyui_base_url, timeout=30) as client:
-            while asyncio.get_running_loop().time() < deadline:
-                result_urls = await self._get_result_urls(client, prompt_id)
-                if result_urls:
-                    return result_urls
-                await asyncio.sleep(self.settings.comfyui_poll_interval_seconds)
+        async with concurrency_slot("comfyui", self.settings.comfyui_max_concurrency):
+            async with httpx.AsyncClient(
+                base_url=self.settings.comfyui_base_url,
+                timeout=30,
+                limits=self._single_connection_limits(),
+            ) as client:
+                while asyncio.get_running_loop().time() < deadline:
+                    result_urls = await self._get_result_urls(client, prompt_id)
+                    if result_urls:
+                        return result_urls
+                    await asyncio.sleep(self.settings.comfyui_poll_interval_seconds)
 
         raise TimeoutError(f"ComfyUI job {prompt_id} did not finish before timeout.")
 
     async def get_result_urls(self, prompt_id: str) -> list[str]:
-        async with httpx.AsyncClient(base_url=self.settings.comfyui_base_url, timeout=30) as client:
-            return await self._get_result_urls(client, prompt_id)
+        async with concurrency_slot("comfyui", self.settings.comfyui_max_concurrency):
+            async with httpx.AsyncClient(
+                base_url=self.settings.comfyui_base_url,
+                timeout=30,
+                limits=self._single_connection_limits(),
+            ) as client:
+                return await self._get_result_urls(client, prompt_id)
 
     async def _get_result_urls(self, client: httpx.AsyncClient, prompt_id: str) -> list[str]:
         response = await client.get(f"/history/{prompt_id}")
@@ -180,3 +196,6 @@ class ComfyUIClient:
                     result_urls.append(f"{self.settings.comfyui_base_url}/view?{query}")
 
         return result_urls
+
+    def _single_connection_limits(self) -> httpx.Limits:
+        return httpx.Limits(max_connections=1, max_keepalive_connections=1)

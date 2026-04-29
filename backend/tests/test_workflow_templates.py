@@ -2,7 +2,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-
 TEMPLATE_DIR = Path(__file__).resolve().parents[1] / "app" / "workflow_templates"
 
 

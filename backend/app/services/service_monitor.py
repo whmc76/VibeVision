@@ -20,31 +20,31 @@ class ServiceMonitor:
         self._process_name_by_pid: dict[int, str] = {}
 
     async def overview(self) -> ServiceOverview:
-        self._pid_by_port = self._pids_for_ports(
-            [
-                self.settings.api_port,
-                self.settings.admin_frontend_port,
-                self.settings.comfyui_port,
-                self.settings.ollama_port,
-            ]
-        )
+        monitored_ports = [
+            self.settings.api_port,
+            self.settings.admin_frontend_port,
+            self.settings.comfyui_port,
+        ]
+        if self._llm_uses_ollama():
+            monitored_ports.append(self.settings.ollama_port)
+        self._pid_by_port = self._pids_for_ports(monitored_ports)
         self._process_name_by_pid = self._process_names_for_pids(
             [pid for pid in self._pid_by_port.values() if pid]
         )
-        api_status, frontend_status, comfyui_status, ollama_status, telegram_status = await asyncio.gather(
+        api_status, frontend_status, comfyui_status, telegram_status = await asyncio.gather(
             self._api_status(),
             self._frontend_status(),
             self._comfyui_status(),
-            self._ollama_status(),
             self._telegram_status(),
         )
+        llm_statuses = await self._llm_statuses()
         running, pending = await self._comfyui_queue_counts()
         return ServiceOverview(
             services=[
                 api_status,
                 frontend_status,
                 comfyui_status,
-                ollama_status,
+                *llm_statuses,
                 telegram_status,
             ],
             queue_running=running,
@@ -197,6 +197,39 @@ class ServiceMonitor:
             endpoint="/api/tags",
             detail_online=f"Models: {self.settings.ollama_model_summary}",
             detail_offline="Ollama is not reachable.",
+        )
+
+    async def _llm_statuses(self) -> list[ServiceStatus]:
+        statuses: list[ServiceStatus] = []
+        if self._llm_uses_minimax():
+            configured = bool(self.settings.minimax_api_key)
+            statuses.append(
+                ServiceStatus(
+                    key="llm",
+                    name="MiniMax LLM",
+                    status="configured" if configured else "unconfigured",
+                    url=self.settings.minimax_base_url,
+                    detail=(
+                        f"Models: {self.settings.minimax_model_summary}"
+                        if configured
+                        else "Set MINIMAX_API_KEY in local config."
+                    ),
+                ),
+            )
+        if self._llm_uses_ollama():
+            statuses.append(await self._ollama_status())
+        return statuses
+
+    def _llm_uses_minimax(self) -> bool:
+        return (
+            self.settings.llm_logic_provider_name == "minimax"
+            or self.settings.llm_prompt_provider_name == "minimax"
+        )
+
+    def _llm_uses_ollama(self) -> bool:
+        return (
+            self.settings.llm_logic_provider_name == "ollama"
+            or self.settings.llm_prompt_provider_name == "ollama"
         )
 
     async def _telegram_status(self) -> ServiceStatus:

@@ -1,11 +1,11 @@
 # VibeVision
 
-VibeVision is an AI generation service for bot-first user workflows. The initial channel is Telegram: users send natural-language requests and media to a bot, the service understands intent with local Ollama, selects the best matching active workflow, dispatches the job to ComfyUI, and tracks memberships and credit usage.
+VibeVision is an AI generation service for bot-first user workflows. The initial channel is Telegram: users send natural-language requests and media to a bot, the service understands intent with the configured LLM provider, selects the best matching active workflow, dispatches the job to ComfyUI, and tracks memberships and credit usage.
 
 ## Scope
 
 - Telegram bot webhook entrypoint.
-- Local Ollama routing plus prompt enhancement, including optional separate logic and prompt models.
+- Configurable LLM routing plus prompt enhancement, with MiniMax M2.7 or local Ollama and optional separate logic and prompt models.
 - ComfyUI workflow dispatch for image generation, editing, and image-to-video jobs.
 - Membership and credit ledger primitives.
 - Admin API for users, jobs, workflows, and credit adjustments.
@@ -23,7 +23,7 @@ scripts/    PowerShell launch scripts that read config/vibevision.env and local 
 
 ## Quick Start
 
-All local ports are configured in `config/vibevision.env`. Put private overrides such as `TELEGRAM_BOT_TOKEN` in ignored `config/vibevision.local.env`. Ollama uses its standard local port, while VibeVision services use a less common range:
+All local ports are configured in `config/vibevision.env`. Put private overrides such as `TELEGRAM_BOT_TOKEN` and `MINIMAX_API_KEY` in ignored `config/vibevision.local.env`. Ollama uses its standard local port when selected, while VibeVision services use a less common range:
 
 - API: `http://localhost:18751`
 - Admin frontend: `http://localhost:18742`
@@ -36,7 +36,7 @@ One-click Windows bootstrap:
 .\start-vibevision.bat
 ```
 
-This entrypoint checks local config, installs/syncs backend dependencies with `uv`, installs frontend dependencies with `npm` when needed, validates ComfyUI/Ollama configuration, starts services, waits for ports, and opens the local control GUI. Use `.\start-vibevision.bat -Repair` to force dependency repair, or `.\start-vibevision.bat -NoGui` to only start and print status.
+This entrypoint checks local config, installs/syncs backend dependencies with `uv`, installs frontend dependencies with `npm` when needed, validates ComfyUI/LLM configuration, starts services, waits for ports, and opens the local control GUI. Use `.\start-vibevision.bat -Repair` to force dependency repair, or `.\start-vibevision.bat -NoGui` to only start and print status.
 
 Backend:
 
@@ -86,7 +86,7 @@ Local service monitor GUI:
 .\scripts\vibevision-control.ps1
 ```
 
-The control window can start the VibeVision background services when it opens, stop them when it exits, refresh service status, open the admin frontend, and show timestamped start/stop/refresh output in its terminal pane. `Start all` starts Ollama when available, ComfyUI as a backend service only, the API, and the admin frontend. `Stop all` stops the VibeVision API, admin frontend, and ComfyUI listeners; Ollama is monitored but left running because it may be shared by other local tools. Uncheck the exit option if you want the VibeVision services to keep running after closing the monitor.
+The control window can start the VibeVision background services when it opens, stop them when it exits, refresh service status, open the admin frontend, and show timestamped start/stop/refresh output in its terminal pane. `Start all` starts Ollama when any LLM role uses Ollama, starts ComfyUI as a backend service only, the API, and the admin frontend. `Stop all` stops the VibeVision API, admin frontend, and ComfyUI listeners; Ollama is monitored but left running because it may be shared by other local tools. Uncheck the exit option if you want the VibeVision services to keep running after closing the monitor.
 
 If your local ComfyUI still runs on its standard port, change only `COMFYUI_PORT` in `config/vibevision.env`.
 
@@ -99,13 +99,35 @@ Configured local defaults:
 - API: `http://localhost:18751`
 - Frontend: `http://localhost:18742`
 
-Default Ollama model:
+Default LLM role split:
+
+```powershell
+LLM_PROVIDER=minimax
+LLM_LOGIC_PROVIDER=minimax
+LLM_PROMPT_PROVIDER=ollama
+MINIMAX_BASE_URL=https://api.minimaxi.com/v1
+MINIMAX_MODEL=codex-MiniMax-M2.7
+MINIMAX_LOGIC_MODEL=codex-MiniMax-M2.7
+OLLAMA_PROMPT_MODEL=huihui_ai/qwen3.5-abliterated:9b
+OLLAMA_MAX_CONCURRENCY=1
+COMFYUI_MAX_CONCURRENCY=1
+```
+
+Put `MINIMAX_API_KEY` in ignored `config/vibevision.local.env`. The MiniMax logic path uses the OpenAI-compatible `/chat/completions` API, matching the hosted M2.7 coding-plan setup. Prompt enhancement uses local Ollama qwen3.5 9b by default so prompt expansion has a dedicated local context budget.
+
+Optional MiniMax model split:
+
+- `MINIMAX_LOGIC_MODEL` controls workflow routing and parameter inference.
+- `MINIMAX_PROMPT_MODEL` controls prompt enhancement before generation.
+- If either is blank, VibeVision falls back to `MINIMAX_MODEL`.
+
+Legacy/local Ollama model:
 
 ```powershell
 ollama pull huihui_ai/qwen3.5-abliterated:9b
 ```
 
-Optional model split:
+Optional Ollama model split:
 
 - `OLLAMA_LOGIC_MODEL` controls workflow routing and parameter inference.
 - `OLLAMA_PROMPT_MODEL` controls prompt enhancement before generation.
@@ -152,7 +174,7 @@ The `/api/telegram/webhook` endpoint is still available when you explicitly want
 
 1. Parse Telegram text, caption, image, document, video, or animation messages.
 2. Resolve uploaded media with Telegram `getFile`.
-3. Route the request with the local Ollama logic model against the active workflow catalog, then enhance the final generation prompt with the prompt model; image inputs are sent to the VLM when available, with fallback workflow selection if Ollama is unavailable.
+3. Route the request with the configured LLM logic model against the active workflow catalog, then enhance the final generation prompt with the prompt model; image inputs are sent to Ollama VLM when either LLM role uses Ollama, with fallback workflow selection if the LLM is unavailable.
 4. Reserve credits and submit the selected workflow to ComfyUI.
 5. Poll ComfyUI history until outputs appear or the configured timeout is reached.
 6. Upload generated media back to the Telegram chat and update task status.

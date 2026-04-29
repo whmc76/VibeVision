@@ -7,6 +7,7 @@ from app.core.config import Settings
 from app.db.session import SessionLocal
 from app.models import GenerationTask, TaskStatus
 from app.services.comfyui import ComfyUIClient
+from app.services.concurrency import concurrency_slot
 from app.services.credits import refund_task_credits
 from app.services.error_details import format_exception_details
 from app.services.task_runner import complete_comfyui_task
@@ -82,52 +83,53 @@ async def _retry_task(task_id: int, settings: Settings) -> None:
         reply_to_message_id = task.telegram_message_id
         kind = task.kind
 
-    try:
-        new_prompt_id = await comfyui.submit_prompt(
-            workflow=workflow,
-            prompt=prompt,
-            source_media_url=source_media_url,
-        )
-    except Exception as exc:
-        detail = format_exception_details(exc)
+    async with concurrency_slot("comfyui", settings.comfyui_max_concurrency):
+        try:
+            new_prompt_id = await comfyui.submit_prompt(
+                workflow=workflow,
+                prompt=prompt,
+                source_media_url=source_media_url,
+            )
+        except Exception as exc:
+            detail = format_exception_details(exc)
+            with SessionLocal() as db:
+                task = _get_task(db, task_id)
+                task.status = TaskStatus.failed
+                task.error_message = detail
+                if task.user:
+                    refund_task_credits(db, task.user, task)
+                db.add(task)
+                db.commit()
+            if chat_id:
+                await TelegramClient(settings).send_message(
+                    chat_id,
+                    "未交付任务自动重试失败，积分已退回。请稍后重新提交。",
+                    reply_to_message_id,
+                )
+            return
+
         with SessionLocal() as db:
             task = _get_task(db, task_id)
-            task.status = TaskStatus.failed
-            task.error_message = detail
-            if task.user:
-                refund_task_credits(db, task.user, task)
+            task.external_job_id = new_prompt_id
+            task.error_message = None
             db.add(task)
             db.commit()
+
         if chat_id:
             await TelegramClient(settings).send_message(
                 chat_id,
-                "未交付任务自动重试失败，积分已退回。请稍后重新提交。",
+                f"任务 #{task_id} 未交付，已自动重试，不会重复扣积分。",
                 reply_to_message_id,
             )
-        return
 
-    with SessionLocal() as db:
-        task = _get_task(db, task_id)
-        task.external_job_id = new_prompt_id
-        task.error_message = None
-        db.add(task)
-        db.commit()
-
-    if chat_id:
-        await TelegramClient(settings).send_message(
-            chat_id,
-            f"任务 #{task_id} 未交付，已自动重试，不会重复扣积分。",
-            reply_to_message_id,
+        await complete_comfyui_task(
+            task_id=task_id,
+            prompt_id=new_prompt_id,
+            chat_id=chat_id or "",
+            reply_to_message_id=reply_to_message_id or "",
+            kind=kind,
+            settings=settings,
         )
-
-    await complete_comfyui_task(
-        task_id=task_id,
-        prompt_id=new_prompt_id,
-        chat_id=chat_id or "",
-        reply_to_message_id=reply_to_message_id or "",
-        kind=kind,
-        settings=settings,
-    )
 
 
 def _get_task(db, task_id: int) -> GenerationTask:

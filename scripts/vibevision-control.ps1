@@ -61,6 +61,65 @@ function Get-EnvText {
   return $DefaultValue
 }
 
+function Get-LlmProvider {
+  return (Get-EnvText -Name "LLM_PROVIDER" -DefaultValue "ollama").Trim().ToLowerInvariant()
+}
+
+function Get-LlmLogicProvider {
+  return (Get-EnvText -Name "LLM_LOGIC_PROVIDER" -DefaultValue (Get-LlmProvider)).Trim().ToLowerInvariant()
+}
+
+function Get-LlmPromptProvider {
+  return (Get-EnvText -Name "LLM_PROMPT_PROVIDER" -DefaultValue (Get-LlmProvider)).Trim().ToLowerInvariant()
+}
+
+function Test-LlmUsesOllama {
+  return (Get-LlmLogicProvider) -eq "ollama" -or (Get-LlmPromptProvider) -eq "ollama"
+}
+
+function Test-LlmUsesMiniMax {
+  return (Get-LlmLogicProvider) -eq "minimax" -or (Get-LlmPromptProvider) -eq "minimax"
+}
+
+function Get-MiniMaxModelDisplay {
+  $BaseModel = Get-EnvText -Name "MINIMAX_MODEL" -DefaultValue ""
+  $LogicModel = Get-EnvText -Name "MINIMAX_LOGIC_MODEL" -DefaultValue ""
+  $PromptModel = Get-EnvText -Name "MINIMAX_PROMPT_MODEL" -DefaultValue ""
+
+  if (-not $LogicModel) {
+    if ($BaseModel) {
+      $LogicModel = $BaseModel
+    } elseif ($PromptModel) {
+      $LogicModel = $PromptModel
+    }
+  }
+
+  if (-not $PromptModel) {
+    if ($BaseModel) {
+      $PromptModel = $BaseModel
+    } elseif ($LogicModel) {
+      $PromptModel = $LogicModel
+    }
+  }
+
+  if ($LogicModel -and $LogicModel -eq $PromptModel) {
+    return "$LogicModel (logic + prompt)"
+  }
+
+  $Parts = @()
+  if ($LogicModel) {
+    $Parts += "logic=$LogicModel"
+  }
+  if ($PromptModel) {
+    $Parts += "prompt=$PromptModel"
+  }
+
+  if ($Parts.Count -eq 0) {
+    return "Models are not configured"
+  }
+  return ($Parts -join ", ")
+}
+
 function Get-OllamaModelDisplay {
   $LegacyModel = Get-EnvText -Name "OLLAMA_MODEL" -DefaultValue ""
   $LogicModel = Get-EnvText -Name "OLLAMA_LOGIC_MODEL" -DefaultValue ""
@@ -301,6 +360,8 @@ function Get-ServiceRows {
   $FrontendHost = Get-EnvText -Name "ADMIN_FRONTEND_HOST" -DefaultValue "localhost"
   $ComfyHost = Get-EnvText -Name "COMFYUI_HOST" -DefaultValue "localhost"
   $OllamaHost = Get-EnvText -Name "OLLAMA_HOST" -DefaultValue "localhost"
+  $UsesOllama = Test-LlmUsesOllama
+  $UsesMiniMax = Test-LlmUsesMiniMax
 
   $ApiPort = Get-EnvInt -Name "API_PORT" -DefaultValue 18751
   $FrontendPort = Get-EnvInt -Name "ADMIN_FRONTEND_PORT" -DefaultValue 18742
@@ -312,7 +373,11 @@ function Get-ServiceRows {
   $ComfyUrl = "http://$($ComfyHost):$ComfyPort"
   $OllamaUrl = "http://$($OllamaHost):$OllamaPort"
 
-  $PidMap = Get-ListenerPidMap -Ports @($ApiPort, $FrontendPort, $ComfyPort, $OllamaPort)
+  $Ports = @($ApiPort, $FrontendPort, $ComfyPort)
+  if ($UsesOllama) {
+    $Ports += $OllamaPort
+  }
+  $PidMap = Get-ListenerPidMap -Ports $Ports
   $ApiPid = if ($PidMap.ContainsKey($ApiPort)) { $PidMap[$ApiPort] } else { $null }
   $FrontendPid = if ($PidMap.ContainsKey($FrontendPort)) { $PidMap[$FrontendPort] } else { $null }
   $ComfyPid = if ($PidMap.ContainsKey($ComfyPort)) { $PidMap[$ComfyPort] } else { $null }
@@ -325,7 +390,12 @@ function Get-ServiceRows {
     New-ServiceRow -Name "API" -Status $(if ($ApiPid) { "online" } else { "offline" }) -Port $ApiPort -ProcessIdValue $ApiPid -Url $ApiUrl -Detail (Get-ProcessLabelFromMap -ProcessIdValue $ApiPid -ProcessLabelMap $ProcessLabelMap)
     New-ServiceRow -Name "Frontend" -Status $(if ($FrontendPid) { "online" } else { "offline" }) -Port $FrontendPort -ProcessIdValue $FrontendPid -Url $FrontendUrl -Detail (Get-ProcessLabelFromMap -ProcessIdValue $FrontendPid -ProcessLabelMap $ProcessLabelMap)
     New-ServiceRow -Name "ComfyUI" -Status $(if ($ComfyPid) { "online" } else { "offline" }) -Port $ComfyPort -ProcessIdValue $ComfyPid -Url $ComfyUrl -Detail (Get-EnvText -Name "COMFYUI_ROOT" -DefaultValue "COMFYUI_ROOT is not configured")
-    New-ServiceRow -Name "Ollama" -Status $(if ($OllamaPid) { "online" } else { "offline" }) -Port $OllamaPort -ProcessIdValue $OllamaPid -Url $OllamaUrl -Detail (Get-OllamaModelDisplay)
+    if ($UsesMiniMax) {
+      New-ServiceRow -Name "MiniMax LLM" -Status $(if ($env:MINIMAX_API_KEY) { "configured" } else { "unconfigured" }) -Port "-" -ProcessIdValue $null -Url (Get-EnvText -Name "MINIMAX_BASE_URL" -DefaultValue "https://api.minimaxi.com/v1") -Detail (Get-MiniMaxModelDisplay)
+    }
+    if ($UsesOllama) {
+      New-ServiceRow -Name "Ollama" -Status $(if ($OllamaPid) { "online" } else { "offline" }) -Port $OllamaPort -ProcessIdValue $OllamaPid -Url $OllamaUrl -Detail (Get-OllamaModelDisplay)
+    }
     New-ServiceRow -Name "Telegram" -Status $Telegram.Status -Port $ApiPort -ProcessIdValue $(if ($Telegram.Pid) { $Telegram.Pid } else { $ApiPid }) -Url $Telegram.Url -Detail $Telegram.Detail
   )
 }
@@ -394,7 +464,7 @@ $Title.Location = New-Object System.Drawing.Point(24, 20)
 $Form.Controls.Add($Title)
 
 $Subtitle = New-Object System.Windows.Forms.Label
-$Subtitle.Text = "Start, stop, refresh, and inspect local API, frontend, ComfyUI, Ollama, and Telegram status."
+$Subtitle.Text = "Start, stop, refresh, and inspect local API, frontend, ComfyUI, LLM, and Telegram status."
 $Subtitle.Font = New-Object System.Drawing.Font("Segoe UI", 9)
 $Subtitle.ForeColor = [System.Drawing.Color]::FromArgb(92, 88, 80)
 $Subtitle.AutoSize = $true

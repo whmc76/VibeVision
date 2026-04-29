@@ -4,7 +4,7 @@ import httpx
 
 from app.core.config import Settings
 from app.models import TaskKind, Workflow
-from app.services.intent import IntentService
+from app.services.intent import IntentResult, IntentService
 
 
 def build_workflows() -> list[Workflow]:
@@ -56,7 +56,7 @@ def dispatchable_template() -> dict:
 
 
 def build_service() -> IntentService:
-    return IntentService(Settings())
+    return IntentService(Settings(llm_provider="ollama"))
 
 
 def test_resolve_target_output_requires_image_or_video_choice() -> None:
@@ -250,14 +250,14 @@ def test_classify_routes_empty_media_request_to_prompt_expand(monkeypatch) -> No
 def test_classify_enhances_generation_prompt_after_fallback(monkeypatch) -> None:
     service = build_service()
 
-    async def fake_classify_with_ollama(**kwargs) -> object:
+    async def fake_classify_with_llm(**kwargs) -> object:
         raise httpx.ConnectError("router offline")
 
-    async def fake_enhance_prompt_with_ollama(**kwargs) -> str:
+    async def fake_enhance_prompt_with_llm(**kwargs) -> str:
         return "cinematic portrait of a silver cat, soft rim light, shallow depth of field"
 
-    monkeypatch.setattr(service, "_classify_with_ollama", fake_classify_with_ollama)
-    monkeypatch.setattr(service, "_enhance_prompt_with_ollama", fake_enhance_prompt_with_ollama)
+    monkeypatch.setattr(service, "_classify_with_llm", fake_classify_with_llm)
+    monkeypatch.setattr(service, "_enhance_prompt_with_llm", fake_enhance_prompt_with_llm)
 
     result = asyncio.run(
         service.classify(
@@ -282,3 +282,53 @@ def test_klein_edit_prompt_enhancement_requires_english_note() -> None:
 
     assert route.workflow_key == "flux2klein-single-edit"
     assert "English prompts" in note
+
+
+def test_llm_json_parser_ignores_thinking_tags() -> None:
+    service = build_service()
+
+    data = service._loads_json_object(
+        '<think>pick a workflow</think>{"workflow_key":"sdxl-text-to-image","prompt":"cat"}'
+    )
+
+    assert data == {"workflow_key": "sdxl-text-to-image", "prompt": "cat"}
+
+
+def test_logic_and_prompt_providers_can_be_split(monkeypatch) -> None:
+    service = IntentService(
+        Settings(
+            llm_provider="minimax",
+            llm_logic_provider="minimax",
+            llm_prompt_provider="ollama",
+            minimax_api_key="test-key",
+            ollama_prompt_model="qwen-prompt-model",
+        )
+    )
+    calls: list[str] = []
+
+    async def fake_classify_with_minimax(**kwargs) -> IntentResult:
+        calls.append("minimax-logic")
+        return IntentResult(
+            workflow_key="sdxl-text-to-image",
+            kind=TaskKind.image_generate,
+            prompt="router brief",
+            confidence=0.8,
+        )
+
+    async def fake_enhance_prompt_with_ollama(**kwargs) -> str:
+        calls.append("ollama-prompt")
+        return "enhanced prompt"
+
+    monkeypatch.setattr(service, "_classify_with_minimax", fake_classify_with_minimax)
+    monkeypatch.setattr(service, "_enhance_prompt_with_ollama", fake_enhance_prompt_with_ollama)
+
+    result = asyncio.run(
+        service.classify(
+            text="生成图片，一只猫",
+            available_workflows=build_workflows(),
+            target_output=service.resolve_target_output("生成图片"),
+        )
+    )
+
+    assert result.prompt == "enhanced prompt"
+    assert calls == ["minimax-logic", "ollama-prompt"]

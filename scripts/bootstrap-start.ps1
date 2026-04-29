@@ -65,6 +65,26 @@ function Get-EnvText {
   return $DefaultValue
 }
 
+function Get-LlmProvider {
+  return (Get-EnvText -Name "LLM_PROVIDER" -DefaultValue "ollama").Trim().ToLowerInvariant()
+}
+
+function Get-LlmLogicProvider {
+  return (Get-EnvText -Name "LLM_LOGIC_PROVIDER" -DefaultValue (Get-LlmProvider)).Trim().ToLowerInvariant()
+}
+
+function Get-LlmPromptProvider {
+  return (Get-EnvText -Name "LLM_PROMPT_PROVIDER" -DefaultValue (Get-LlmProvider)).Trim().ToLowerInvariant()
+}
+
+function Test-LlmUsesOllama {
+  return (Get-LlmLogicProvider) -eq "ollama" -or (Get-LlmPromptProvider) -eq "ollama"
+}
+
+function Test-LlmUsesMiniMax {
+  return (Get-LlmLogicProvider) -eq "minimax" -or (Get-LlmPromptProvider) -eq "minimax"
+}
+
 function Get-EnvInt {
   param(
     [string]$Name,
@@ -77,6 +97,45 @@ function Get-EnvInt {
     return $Parsed
   }
   return $DefaultValue
+}
+
+function Get-MiniMaxModelDisplay {
+  $BaseModel = Get-EnvText -Name "MINIMAX_MODEL" -DefaultValue ""
+  $LogicModel = Get-EnvText -Name "MINIMAX_LOGIC_MODEL" -DefaultValue ""
+  $PromptModel = Get-EnvText -Name "MINIMAX_PROMPT_MODEL" -DefaultValue ""
+
+  if (-not $LogicModel) {
+    if ($BaseModel) {
+      $LogicModel = $BaseModel
+    } elseif ($PromptModel) {
+      $LogicModel = $PromptModel
+    }
+  }
+
+  if (-not $PromptModel) {
+    if ($BaseModel) {
+      $PromptModel = $BaseModel
+    } elseif ($LogicModel) {
+      $PromptModel = $LogicModel
+    }
+  }
+
+  if ($LogicModel -and $LogicModel -eq $PromptModel) {
+    return "$LogicModel (logic + prompt)"
+  }
+
+  $Parts = @()
+  if ($LogicModel) {
+    $Parts += "logic=$LogicModel"
+  }
+  if ($PromptModel) {
+    $Parts += "prompt=$PromptModel"
+  }
+
+  if ($Parts.Count -eq 0) {
+    return "Models are not configured"
+  }
+  return ($Parts -join ", ")
 }
 
 function Get-OllamaModelRoleMap {
@@ -139,8 +198,11 @@ function Ensure-LocalConfig {
   $Template = @"
 # Local private overrides for VibeVision.
 # This file is ignored by git.
+LLM_LOGIC_PROVIDER=minimax
+LLM_PROMPT_PROVIDER=ollama
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_WEBHOOK_SECRET=
+MINIMAX_API_KEY=
 "@
   Set-Content -LiteralPath $LocalConfigPath -Value $Template -Encoding UTF8
   Write-Ok "Created local config: $LocalConfigPath"
@@ -286,6 +348,28 @@ function Test-OllamaConfig {
   }
 }
 
+function Test-MiniMaxConfig {
+  Write-Step "Checking MiniMax"
+  $ApiKey = Get-EnvText -Name "MINIMAX_API_KEY" -DefaultValue ""
+  $BaseUrl = Get-EnvText -Name "MINIMAX_BASE_URL" -DefaultValue "https://api.minimaxi.com/v1"
+  if (-not $ApiKey) {
+    Write-WarnLine "MINIMAX_API_KEY is not configured. LLM routing will fall back to heuristic routing."
+    return
+  }
+  Write-Ok "MiniMax API key is configured."
+  Write-Ok "MiniMax endpoint: $BaseUrl"
+  Write-Ok "MiniMax models: $(Get-MiniMaxModelDisplay)"
+}
+
+function Test-LlmConfig {
+  if (Test-LlmUsesMiniMax) {
+    Test-MiniMaxConfig
+  }
+  if (Test-LlmUsesOllama) {
+    Test-OllamaConfig
+  }
+}
+
 function Start-Services {
   Write-Step "Starting VibeVision services"
   & (Join-Path $Root "scripts\start-all.ps1") -ConfigPath $ConfigPath -LocalConfigPath $LocalConfigPath
@@ -301,7 +385,9 @@ function Show-ServiceStatus {
   [void](Wait-Port -Name "VibeVision API" -Port $ApiPort -TimeoutSeconds $WaitSeconds)
   [void](Wait-Port -Name "Admin frontend" -Port $FrontendPort -TimeoutSeconds $WaitSeconds)
   [void](Wait-Port -Name "ComfyUI" -Port $ComfyPort -TimeoutSeconds $WaitSeconds)
-  [void](Wait-Port -Name "Ollama" -Port $OllamaPort -TimeoutSeconds 5)
+  if (Test-LlmUsesOllama) {
+    [void](Wait-Port -Name "Ollama" -Port $OllamaPort -TimeoutSeconds 5)
+  }
 
   $ApiUrl = "http://$(Get-EnvText -Name "API_HOST" -DefaultValue "127.0.0.1"):$ApiPort"
   $FrontendUrl = "http://$(Get-EnvText -Name "ADMIN_FRONTEND_HOST" -DefaultValue "127.0.0.1"):$FrontendPort"
@@ -342,7 +428,7 @@ if (-not $SkipInstall) {
 }
 
 Test-ComfyUIConfig
-Test-OllamaConfig
+Test-LlmConfig
 Start-Services
 Show-ServiceStatus
 Open-Monitor

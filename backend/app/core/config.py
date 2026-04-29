@@ -12,6 +12,9 @@ LOCAL_CONFIG_FILE = ROOT_DIR / "config" / "vibevision.local.env"
 class Settings(BaseSettings):
     app_name: str = "VibeVision"
     environment: str = "development"
+    llm_provider: str = "ollama"
+    llm_logic_provider: str = ""
+    llm_prompt_provider: str = ""
     api_host: str = "127.0.0.1"
     api_port: int = 18751
     admin_frontend_host: str = "127.0.0.1"
@@ -24,10 +27,18 @@ class Settings(BaseSettings):
     ollama_logic_model: str = ""
     ollama_prompt_model: str = ""
     ollama_vision_max_bytes: int = 8_000_000
+    ollama_max_concurrency: int = 1
+    minimax_base_url: str = "https://api.minimaxi.com/v1"
+    minimax_api_key: str = Field(default="", repr=False)
+    minimax_model: str = "codex-MiniMax-M2.7"
+    minimax_logic_model: str = ""
+    minimax_prompt_model: str = ""
+    minimax_timeout_seconds: int = 60
     comfyui_host: str = "127.0.0.1"
     comfyui_port: int = 8401
     comfyui_root: str = ""
     comfyui_start_script: str = "run_nvidia_gpu.bat"
+    comfyui_max_concurrency: int = 1
     telegram_bot_token: str = ""
     telegram_webhook_secret: str = Field(default="", repr=False)
     comfyui_poll_interval_seconds: int = 3
@@ -49,10 +60,33 @@ class Settings(BaseSettings):
             return f"sqlite:///{database_path.as_posix()}"
         return value
 
-    @field_validator("ollama_model", "ollama_logic_model", "ollama_prompt_model", mode="before")
+    @field_validator("llm_provider", "llm_logic_provider", "llm_prompt_provider", mode="before")
+    @classmethod
+    def normalize_llm_provider(cls, value: str | None) -> str:
+        normalized = str(value or "").strip().lower()
+        if not normalized:
+            return ""
+        if normalized in {"minimax", "mini-max", "m2", "m2.7"}:
+            return "minimax"
+        return "ollama"
+
+    @field_validator(
+        "ollama_model",
+        "ollama_logic_model",
+        "ollama_prompt_model",
+        "minimax_model",
+        "minimax_logic_model",
+        "minimax_prompt_model",
+        mode="before",
+    )
     @classmethod
     def normalize_model_name(cls, value: str | None) -> str:
         return str(value or "").strip()
+
+    @field_validator("minimax_base_url", mode="before")
+    @classmethod
+    def normalize_base_url(cls, value: str | None) -> str:
+        return str(value or "https://api.minimaxi.com/v1").strip().rstrip("/")
 
     @property
     def cors_origins(self) -> list[str]:
@@ -67,6 +101,18 @@ class Settings(BaseSettings):
         return f"http://{self.ollama_host}:{self.ollama_port}"
 
     @property
+    def llm_provider_name(self) -> str:
+        return self.llm_provider or "ollama"
+
+    @property
+    def llm_logic_provider_name(self) -> str:
+        return self.llm_logic_provider or self.llm_provider_name
+
+    @property
+    def llm_prompt_provider_name(self) -> str:
+        return self.llm_prompt_provider or self.llm_provider_name
+
+    @property
     def comfyui_base_url(self) -> str:
         return f"http://{self.comfyui_host}:{self.comfyui_port}"
 
@@ -79,9 +125,42 @@ class Settings(BaseSettings):
         return self.ollama_prompt_model or self.ollama_model or self.ollama_logic_model
 
     @property
+    def minimax_logic_model_name(self) -> str:
+        return self.minimax_logic_model or self.minimax_model or self.minimax_prompt_model
+
+    @property
+    def minimax_prompt_model_name(self) -> str:
+        return self.minimax_prompt_model or self.minimax_model or self.minimax_logic_model
+
+    @property
     def ollama_model_summary(self) -> str:
         logic_model = self.ollama_logic_model_name
         prompt_model = self.ollama_prompt_model_name
+        return self._model_summary(logic_model, prompt_model)
+
+    @property
+    def minimax_model_summary(self) -> str:
+        logic_model = self.minimax_logic_model_name
+        prompt_model = self.minimax_prompt_model_name
+        return self._model_summary(logic_model, prompt_model)
+
+    @property
+    def llm_model_summary(self) -> str:
+        logic = self._role_model_summary(
+            role="logic",
+            provider=self.llm_logic_provider_name,
+            ollama_model=self.ollama_logic_model_name,
+            minimax_model=self.minimax_logic_model_name,
+        )
+        prompt = self._role_model_summary(
+            role="prompt",
+            provider=self.llm_prompt_provider_name,
+            ollama_model=self.ollama_prompt_model_name,
+            minimax_model=self.minimax_prompt_model_name,
+        )
+        return f"{logic}, {prompt}"
+
+    def _model_summary(self, logic_model: str, prompt_model: str) -> str:
         if logic_model and logic_model == prompt_model:
             return f"{logic_model} (logic + prompt)"
         parts: list[str] = []
@@ -90,6 +169,18 @@ class Settings(BaseSettings):
         if prompt_model:
             parts.append(f"prompt={prompt_model}")
         return ", ".join(parts) or "Models are not configured"
+
+    def _role_model_summary(
+        self,
+        *,
+        role: str,
+        provider: str,
+        ollama_model: str,
+        minimax_model: str,
+    ) -> str:
+        if provider == "minimax":
+            return f"{role}=MiniMax:{minimax_model or 'not configured'}"
+        return f"{role}=Ollama:{ollama_model or 'not configured'}"
 
 
 @lru_cache

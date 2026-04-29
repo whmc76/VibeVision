@@ -73,6 +73,7 @@ const serviceIcons: Record<string, typeof Server> = {
   api: Server,
   frontend: Activity,
   comfyui: Cpu,
+  llm: Sparkles,
   ollama: Sparkles,
   telegram: Bot,
 };
