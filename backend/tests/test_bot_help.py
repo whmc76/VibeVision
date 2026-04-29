@@ -105,6 +105,9 @@ def test_build_help_message_reflects_active_workflows_and_credit_costs() -> None
     assert "/photo 或 /p <描述> 直接提交图片任务" in message
     assert "/video 或 /v <描述> 直接提交视频任务" in message
     assert "/check 查询套餐和剩余点数" in message
+    assert "生图/生成图片/出图 <描述> 直接提交图片任务" in message
+    assert "生视频/生成视频/出视频 <描述> 直接提交视频任务" in message
+    assert "图生视频 <描述> 配合图片提交视频任务" in message
 
 
 def test_resolve_quick_action_supports_keyboard_entries_and_check_command() -> None:
@@ -129,6 +132,7 @@ def test_build_image_workflow_message_lists_active_image_capabilities() -> None:
     assert "图生视频" not in message
     assert "推荐写法：/photo 生成一张赛博朋克风的人像海报" in message
     assert "缩写也可以：/p 生成一张赛博朋克风的人像海报" in message
+    assert "关键词也可以：生图 生成一张赛博朋克风的人像海报" in message
 
 
 def test_build_video_workflow_message_includes_video_cost() -> None:
@@ -138,6 +142,8 @@ def test_build_video_workflow_message_includes_video_cost() -> None:
     assert "图生视频（10 积分/次）" in message
     assert "推荐写法：/video 生成一个霓虹街头雨夜慢镜头短视频" in message
     assert "缩写也可以：/v 生成一个霓虹街头雨夜慢镜头短视频" in message
+    assert "关键词也可以：生视频 生成一个霓虹街头雨夜慢镜头短视频" in message
+    assert "图生视频可以写：图生视频 镜头缓慢推进" in message
 
 
 def test_build_account_message_formats_tier_and_balance() -> None:

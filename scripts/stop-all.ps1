@@ -122,6 +122,5 @@ Import-VibeVisionConfig -Path $LocalConfigPath
 Stop-TelegramPoller
 Stop-Listener -Port ([int]$env:ADMIN_FRONTEND_PORT) -Label "admin frontend"
 Stop-Listener -Port ([int]$env:API_PORT) -Label "VibeVision API"
-Stop-Listener -Port ([int]$env:COMFYUI_PORT) -Label "ComfyUI"
 
-Write-Host "VibeVision services stopped. Ollama is monitored but left running because it may be shared by other local tools."
+Write-Host "VibeVision services stopped. ComfyUI and Ollama were left running because they are external services."

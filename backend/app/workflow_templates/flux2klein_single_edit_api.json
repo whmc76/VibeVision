@@ -12,14 +12,14 @@
     "104": {
       "class_type": "UNETLoader",
       "inputs": {
-        "unet_name": "flux-2-klein-9b.safetensors",
+        "unet_name": "klein_miracleinNSFWGeneration_10Nvfp4.safetensors",
         "weight_dtype": "default"
       }
     },
     "110": {
       "class_type": "CLIPLoader",
       "inputs": {
-        "clip_name": "qwen_3_8b.safetensors",
+        "clip_name": "qwen_3_8b_fp4mixed.safetensors",
         "type": "flux2",
         "device": "default"
       }

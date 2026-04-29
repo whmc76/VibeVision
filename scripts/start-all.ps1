@@ -45,33 +45,8 @@ function Test-TelegramPollerRunning {
 Import-VibeVisionConfig -Path $ConfigPath
 Import-VibeVisionConfig -Path $LocalConfigPath
 
-Write-Host "Cleaning existing VibeVision service processes before start."
-& (Join-Path $Root "scripts\stop-all.ps1") -ConfigPath $ConfigPath -LocalConfigPath $LocalConfigPath
-
-$LlmProvider = if ($env:LLM_PROVIDER) { $env:LLM_PROVIDER.Trim().ToLowerInvariant() } else { "ollama" }
-$LogicProvider = if ($env:LLM_LOGIC_PROVIDER) { $env:LLM_LOGIC_PROVIDER.Trim().ToLowerInvariant() } else { $LlmProvider }
-$PromptProvider = if ($env:LLM_PROMPT_PROVIDER) { $env:LLM_PROMPT_PROVIDER.Trim().ToLowerInvariant() } else { $LlmProvider }
-$VisionProvider = if ($env:LLM_VISION_PROVIDER) { $env:LLM_VISION_PROVIDER.Trim().ToLowerInvariant() } else { "minimax_mcp" }
-$NeedsOllama = $LogicProvider -eq "ollama" -or $PromptProvider -eq "ollama" -or $VisionProvider -eq "ollama"
-
-if (-not $NeedsOllama) {
-  Write-Host "No LLM role uses Ollama; skipping Ollama start."
-} elseif (-not (Test-PortListening -Port ([int]$env:OLLAMA_PORT))) {
-  $OllamaCommand = Get-Command "ollama" -ErrorAction SilentlyContinue
-  if ($OllamaCommand) {
-    Start-Process `
-      -FilePath $OllamaCommand.Source `
-      -ArgumentList @("serve") `
-      -WindowStyle Hidden
-    Write-Host "Started Ollama service on port $($env:OLLAMA_PORT)."
-  } else {
-    Write-Host "Ollama command not found; skipping Ollama start."
-  }
-} else {
-  Write-Host "Ollama is already listening on port $($env:OLLAMA_PORT)."
-}
-
-& (Join-Path $Root "scripts\start-comfyui.ps1") -ConfigPath $ConfigPath -LocalConfigPath $LocalConfigPath
+Write-Host "Starting missing VibeVision services. Existing listeners will be left running."
+Write-Host "ComfyUI and Ollama are external services; use their control GUI buttons to start or restart them."
 
 if (-not (Test-PortListening -Port ([int]$env:API_PORT))) {
   Start-Process `

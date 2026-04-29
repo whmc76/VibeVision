@@ -41,6 +41,7 @@ async def submit_bot_message(
             else append_error_detail(
                 "Task created but dispatch failed.",
                 task.error_message,
+                task_id=task.id,
             )
         ),
     )

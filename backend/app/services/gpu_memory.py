@@ -163,6 +163,7 @@ async def release_ollama_gpu_memory(settings: Settings) -> None:
             base_url=settings.ollama_base_url,
             timeout=15,
             limits=_single_connection_limits(),
+            trust_env=False,
         ) as client:
             loaded_models = await _loaded_ollama_models(client)
             target_models = models
@@ -225,6 +226,7 @@ async def release_comfyui_gpu_memory(settings: Settings) -> None:
             base_url=settings.comfyui_base_url,
             timeout=30,
             limits=_single_connection_limits(),
+            trust_env=False,
         ) as client:
             if await _comfyui_queue_has_work(client):
                 schedule_comfyui_gpu_release(settings)

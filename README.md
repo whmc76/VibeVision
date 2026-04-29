@@ -36,7 +36,7 @@ One-click Windows bootstrap:
 .\start-vibevision.bat
 ```
 
-This entrypoint checks local config, installs/syncs backend dependencies with `uv`, installs frontend dependencies with `npm` when needed, validates ComfyUI/LLM configuration, starts services, waits for ports, and opens the local control GUI. Use `.\start-vibevision.bat -Repair` to force dependency repair, or `.\start-vibevision.bat -NoGui` to only start and print status.
+This entrypoint checks local config, installs/syncs backend dependencies with `uv`, installs frontend dependencies with `npm` when needed, validates ComfyUI/LLM configuration, starts missing VibeVision services without restarting existing listeners, checks external service status, and opens the local control GUI. Use `.\start-vibevision.bat -Repair` to force dependency repair, or `.\start-vibevision.bat -NoGui` to only start and print status.
 
 Backend:
 
@@ -73,11 +73,18 @@ ComfyUI backend service:
 
 This starts the ComfyUI HTTP backend from `COMFYUI_ROOT` and does not open the ComfyUI browser UI.
 
-Start or stop the local service group:
+Start or stop the local VibeVision service group:
 
 ```powershell
 .\scripts\start-all.ps1
 .\scripts\stop-all.ps1
+```
+
+ComfyUI and Ollama are treated as external services. Start or restart them explicitly when needed:
+
+```powershell
+.\scripts\restart-comfyui.ps1
+.\scripts\restart-ollama.ps1
 ```
 
 Local service monitor GUI:
@@ -86,7 +93,7 @@ Local service monitor GUI:
 .\scripts\vibevision-control.ps1
 ```
 
-The control window can start the VibeVision background services when it opens, stop them when it exits, refresh service status, open the admin frontend, and show timestamped start/stop/refresh output in its terminal pane. `Start all` starts Ollama when any LLM role uses Ollama, starts ComfyUI as a backend service only, the API, and the admin frontend. `Stop all` stops the VibeVision API, admin frontend, and ComfyUI listeners; Ollama is monitored but left running because it may be shared by other local tools. Uncheck the exit option if you want the VibeVision services to keep running after closing the monitor.
+The control window can start missing VibeVision background services when it opens, stop VibeVision services when it exits, refresh service status automatically, and show timestamped operation output in its terminal pane. The three main controls are `Start/Restart VibeVision`, `Start/Restart ComfyUI`, and `Start/Restart Ollama`; ComfyUI and Ollama are not started or stopped by the default VibeVision start/stop flow.
 
 If your local ComfyUI still runs on its standard port, change only `COMFYUI_PORT` in `config/vibevision.env`.
 
@@ -208,6 +215,6 @@ For image or video generation to complete, ComfyUI must be reachable at the host
 
 The default `image.edit` route is wired to `backend/app/workflow_templates/flux2klein_single_edit_api.json`, converted from `Flux2Klein_SingleEdit.json`. It expects the matching ComfyUI custom nodes and model files:
 
-- `flux-2-klein-9b.safetensors`
-- `qwen_3_8b.safetensors`
+- `klein_miracleinNSFWGeneration_10Nvfp4.safetensors`
+- `qwen_3_8b_fp4mixed.safetensors`
 - `flux2-vae.safetensors`

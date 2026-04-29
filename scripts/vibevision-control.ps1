@@ -452,32 +452,120 @@ Add-Type -AssemblyName System.Drawing
 
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
+$ColorWindow = [System.Drawing.Color]::FromArgb(244, 246, 243)
+$ColorSurface = [System.Drawing.Color]::FromArgb(255, 255, 252)
+$ColorSurfaceMuted = [System.Drawing.Color]::FromArgb(238, 242, 236)
+$ColorBorder = [System.Drawing.Color]::FromArgb(218, 224, 216)
+$ColorText = [System.Drawing.Color]::FromArgb(24, 29, 25)
+$ColorMuted = [System.Drawing.Color]::FromArgb(91, 101, 92)
+$ColorAccent = [System.Drawing.Color]::FromArgb(22, 64, 50)
+$ColorAccentSoft = [System.Drawing.Color]::FromArgb(223, 238, 229)
+$ColorLog = [System.Drawing.Color]::FromArgb(19, 24, 21)
+
 $Form = New-Object System.Windows.Forms.Form
 $Form.Text = "VibeVision Control"
 $Form.StartPosition = "CenterScreen"
-$Form.Width = 1080
-$Form.Height = 720
-$Form.MinimumSize = New-Object System.Drawing.Size(900, 600)
-$Form.BackColor = [System.Drawing.Color]::FromArgb(246, 244, 239)
+$Form.Width = 1160
+$Form.Height = 760
+$Form.MinimumSize = New-Object System.Drawing.Size(1100, 660)
+$Form.BackColor = $ColorWindow
+$Form.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+
+$HeaderPanel = New-Object System.Windows.Forms.Panel
+$HeaderPanel.Location = New-Object System.Drawing.Point(24, 20)
+$HeaderPanel.Size = New-Object System.Drawing.Size(1096, 96)
+$HeaderPanel.Anchor = "Top,Left,Right"
+$HeaderPanel.BackColor = $ColorSurface
+$HeaderPanel.BorderStyle = "None"
+$Form.Controls.Add($HeaderPanel)
 
 $Title = New-Object System.Windows.Forms.Label
-$Title.Text = "VibeVision service monitor"
-$Title.Font = New-Object System.Drawing.Font("Segoe UI", 18, [System.Drawing.FontStyle]::Bold)
+$Title.Text = "VibeVision Control Center"
+$Title.Font = New-Object System.Drawing.Font("Segoe UI", 20, [System.Drawing.FontStyle]::Bold)
+$Title.ForeColor = $ColorText
 $Title.AutoSize = $true
-$Title.Location = New-Object System.Drawing.Point(24, 20)
-$Form.Controls.Add($Title)
+$Title.Location = New-Object System.Drawing.Point(20, 18)
+$HeaderPanel.Controls.Add($Title)
 
 $Subtitle = New-Object System.Windows.Forms.Label
-$Subtitle.Text = "Start, stop, refresh, and inspect local API, frontend, ComfyUI, LLM, and Telegram status."
+$Subtitle.Text = "Local service status, runtime logs, and quick actions."
 $Subtitle.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-$Subtitle.ForeColor = [System.Drawing.Color]::FromArgb(92, 88, 80)
+$Subtitle.ForeColor = $ColorMuted
 $Subtitle.AutoSize = $true
-$Subtitle.Location = New-Object System.Drawing.Point(27, 58)
-$Form.Controls.Add($Subtitle)
+$Subtitle.Location = New-Object System.Drawing.Point(22, 58)
+$HeaderPanel.Controls.Add($Subtitle)
+
+$ButtonPanel = New-Object System.Windows.Forms.FlowLayoutPanel
+$ButtonPanel.FlowDirection = "LeftToRight"
+$ButtonPanel.WrapContents = $false
+$ButtonPanel.Anchor = "Top,Right"
+$ButtonPanel.Location = New-Object System.Drawing.Point(492, 28)
+$ButtonPanel.Size = New-Object System.Drawing.Size(584, 44)
+$ButtonPanel.Padding = New-Object System.Windows.Forms.Padding(0)
+$ButtonPanel.BackColor = $ColorSurface
+$HeaderPanel.Controls.Add($ButtonPanel)
+
+function New-ControlButton {
+  param(
+    [string]$Text,
+    [int]$Width = 112,
+    [switch]$Primary
+  )
+
+  $Button = New-Object System.Windows.Forms.Button
+  $Button.Text = $Text
+  $Button.Width = $Width
+  $Button.Height = 36
+  $Button.Margin = New-Object System.Windows.Forms.Padding(4)
+  $Button.FlatStyle = "Flat"
+  $Button.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Regular)
+  $Button.FlatAppearance.BorderSize = 1
+  if ($Primary) {
+    $Button.BackColor = $ColorAccent
+    $Button.ForeColor = [System.Drawing.Color]::White
+    $Button.FlatAppearance.BorderColor = $ColorAccent
+    $Button.FlatAppearance.MouseOverBackColor = [System.Drawing.Color]::FromArgb(31, 86, 67)
+    $Button.FlatAppearance.MouseDownBackColor = [System.Drawing.Color]::FromArgb(15, 45, 35)
+  } else {
+    $Button.BackColor = $ColorSurface
+    $Button.ForeColor = $ColorText
+    $Button.FlatAppearance.BorderColor = $ColorBorder
+    $Button.FlatAppearance.MouseOverBackColor = $ColorAccentSoft
+    $Button.FlatAppearance.MouseDownBackColor = $ColorSurfaceMuted
+  }
+  return $Button
+}
+
+$AdminPageButton = New-ControlButton -Text "Open Admin" -Width 112 -Primary
+$VibeVisionButton = New-ControlButton -Text "Restart VibeVision" -Width 146
+$ComfyUIButton = New-ControlButton -Text "Restart ComfyUI" -Width 132
+$OllamaButton = New-ControlButton -Text "Restart Ollama" -Width 124
+
+$ButtonPanel.Controls.Add($AdminPageButton)
+$ButtonPanel.Controls.Add($VibeVisionButton)
+$ButtonPanel.Controls.Add($ComfyUIButton)
+$ButtonPanel.Controls.Add($OllamaButton)
+
+$ServicesLabel = New-Object System.Windows.Forms.Label
+$ServicesLabel.Text = "Service Status"
+$ServicesLabel.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
+$ServicesLabel.ForeColor = $ColorText
+$ServicesLabel.AutoSize = $true
+$ServicesLabel.Location = New-Object System.Drawing.Point(28, 140)
+$Form.Controls.Add($ServicesLabel)
+
+$ServicesHint = New-Object System.Windows.Forms.Label
+$ServicesHint.Text = "Auto-refreshes every few seconds"
+$ServicesHint.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+$ServicesHint.ForeColor = $ColorMuted
+$ServicesHint.AutoSize = $true
+$ServicesHint.Anchor = "Top,Right"
+$ServicesHint.Location = New-Object System.Drawing.Point(918, 142)
+$Form.Controls.Add($ServicesHint)
 
 $Grid = New-Object System.Windows.Forms.DataGridView
-$Grid.Location = New-Object System.Drawing.Point(28, 94)
-$Grid.Size = New-Object System.Drawing.Size(1005, 300)
+$Grid.Location = New-Object System.Drawing.Point(28, 170)
+$Grid.Size = New-Object System.Drawing.Size(1092, 286)
 $Grid.Anchor = "Top,Left,Right"
 $Grid.ReadOnly = $true
 $Grid.AllowUserToAddRows = $false
@@ -486,89 +574,79 @@ $Grid.AllowUserToResizeRows = $false
 $Grid.RowHeadersVisible = $false
 $Grid.SelectionMode = "FullRowSelect"
 $Grid.AutoSizeColumnsMode = "Fill"
-$Grid.BackgroundColor = [System.Drawing.Color]::White
-$Grid.BorderStyle = "FixedSingle"
+$Grid.BackgroundColor = $ColorSurface
+$Grid.BorderStyle = "None"
+$Grid.GridColor = [System.Drawing.Color]::FromArgb(231, 235, 229)
+$Grid.CellBorderStyle = "SingleHorizontal"
+$Grid.ColumnHeadersBorderStyle = "None"
+$Grid.RowTemplate.Height = 44
+$Grid.ColumnHeadersHeight = 40
+$Grid.ColumnHeadersHeightSizeMode = "DisableResizing"
 $Grid.EnableHeadersVisualStyles = $false
-$Grid.ColumnHeadersDefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(236, 231, 221)
-$Grid.ColumnHeadersDefaultCellStyle.ForeColor = [System.Drawing.Color]::FromArgb(38, 36, 32)
-$Grid.DefaultCellStyle.SelectionBackColor = [System.Drawing.Color]::FromArgb(223, 241, 230)
-$Grid.DefaultCellStyle.SelectionForeColor = [System.Drawing.Color]::FromArgb(28, 27, 24)
+$Grid.ColumnHeadersDefaultCellStyle.BackColor = $ColorSurfaceMuted
+$Grid.ColumnHeadersDefaultCellStyle.ForeColor = $ColorMuted
+$Grid.ColumnHeadersDefaultCellStyle.Font = New-Object System.Drawing.Font("Segoe UI", 9, [System.Drawing.FontStyle]::Bold)
+$Grid.ColumnHeadersDefaultCellStyle.Padding = New-Object System.Windows.Forms.Padding(8, 0, 8, 0)
+$Grid.DefaultCellStyle.BackColor = $ColorSurface
+$Grid.DefaultCellStyle.ForeColor = $ColorText
+$Grid.DefaultCellStyle.Font = New-Object System.Drawing.Font("Segoe UI", 9)
+$Grid.DefaultCellStyle.Padding = New-Object System.Windows.Forms.Padding(8, 0, 8, 0)
+$Grid.DefaultCellStyle.SelectionBackColor = $ColorAccentSoft
+$Grid.DefaultCellStyle.SelectionForeColor = $ColorText
+$Grid.AlternatingRowsDefaultCellStyle.BackColor = [System.Drawing.Color]::FromArgb(250, 251, 248)
+$Grid.AlternatingRowsDefaultCellStyle.ForeColor = $ColorText
 $Form.Controls.Add($Grid)
 
+$LogLabel = New-Object System.Windows.Forms.Label
+$LogLabel.Text = "Runtime Log"
+$LogLabel.Font = New-Object System.Drawing.Font("Segoe UI", 11, [System.Drawing.FontStyle]::Bold)
+$LogLabel.ForeColor = $ColorText
+$LogLabel.AutoSize = $true
+$LogLabel.Location = New-Object System.Drawing.Point(28, 482)
+$LogLabel.Anchor = "Top,Left"
+$Form.Controls.Add($LogLabel)
+
 $LogBox = New-Object System.Windows.Forms.TextBox
-$LogBox.Location = New-Object System.Drawing.Point(28, 410)
-$LogBox.Size = New-Object System.Drawing.Size(1005, 185)
+$LogBox.Location = New-Object System.Drawing.Point(28, 512)
+$LogBox.Size = New-Object System.Drawing.Size(1092, 150)
 $LogBox.Anchor = "Top,Left,Right,Bottom"
 $LogBox.Multiline = $true
 $LogBox.ReadOnly = $true
 $LogBox.ScrollBars = "Vertical"
-$LogBox.BackColor = [System.Drawing.Color]::FromArgb(32, 31, 29)
-$LogBox.ForeColor = [System.Drawing.Color]::FromArgb(232, 229, 222)
+$LogBox.BorderStyle = "None"
+$LogBox.BackColor = $ColorLog
+$LogBox.ForeColor = [System.Drawing.Color]::FromArgb(226, 232, 224)
 $LogBox.Font = New-Object System.Drawing.Font("Consolas", 9)
 $Form.Controls.Add($LogBox)
 
 $StatusLabel = New-Object System.Windows.Forms.Label
 $StatusLabel.Text = "Ready."
 $StatusLabel.Font = New-Object System.Drawing.Font("Segoe UI", 9)
-$StatusLabel.ForeColor = [System.Drawing.Color]::FromArgb(92, 88, 80)
+$StatusLabel.ForeColor = $ColorMuted
 $StatusLabel.AutoSize = $true
-$StatusLabel.Location = New-Object System.Drawing.Point(28, 612)
+$StatusLabel.Location = New-Object System.Drawing.Point(28, 676)
 $StatusLabel.Anchor = "Left,Bottom"
 $Form.Controls.Add($StatusLabel)
 
 $StartOnOpen = New-Object System.Windows.Forms.CheckBox
-$StartOnOpen.Text = "Start background services when this window opens"
+$StartOnOpen.Text = "Start missing VibeVision services when this window opens"
 $StartOnOpen.Checked = (-not $NoAutoStart)
 $StartOnOpen.AutoSize = $true
-$StartOnOpen.Location = New-Object System.Drawing.Point(28, 642)
+$StartOnOpen.Location = New-Object System.Drawing.Point(28, 700)
 $StartOnOpen.Anchor = "Left,Bottom"
+$StartOnOpen.ForeColor = $ColorText
+$StartOnOpen.BackColor = $ColorWindow
 $Form.Controls.Add($StartOnOpen)
 
 $StopOnExit = New-Object System.Windows.Forms.CheckBox
-$StopOnExit.Text = "Stop background services when this window exits"
+$StopOnExit.Text = "Stop VibeVision services when this window exits"
 $StopOnExit.Checked = $true
 $StopOnExit.AutoSize = $true
-$StopOnExit.Location = New-Object System.Drawing.Point(360, 642)
+$StopOnExit.Location = New-Object System.Drawing.Point(388, 700)
 $StopOnExit.Anchor = "Left,Bottom"
+$StopOnExit.ForeColor = $ColorText
+$StopOnExit.BackColor = $ColorWindow
 $Form.Controls.Add($StopOnExit)
-
-$ButtonPanel = New-Object System.Windows.Forms.FlowLayoutPanel
-$ButtonPanel.FlowDirection = "LeftToRight"
-$ButtonPanel.WrapContents = $false
-$ButtonPanel.Anchor = "Right,Bottom"
-$ButtonPanel.Location = New-Object System.Drawing.Point(610, 604)
-$ButtonPanel.Size = New-Object System.Drawing.Size(425, 46)
-$ButtonPanel.Padding = New-Object System.Windows.Forms.Padding(0)
-$Form.Controls.Add($ButtonPanel)
-
-function New-ControlButton {
-  param(
-    [string]$Text,
-    [int]$Width = 78
-  )
-
-  $Button = New-Object System.Windows.Forms.Button
-  $Button.Text = $Text
-  $Button.Width = $Width
-  $Button.Height = 34
-  $Button.Margin = New-Object System.Windows.Forms.Padding(4)
-  $Button.FlatStyle = "Flat"
-  $Button.BackColor = [System.Drawing.Color]::White
-  $Button.ForeColor = [System.Drawing.Color]::FromArgb(28, 27, 24)
-  return $Button
-}
-
-$StartButton = New-ControlButton -Text "Start all"
-$StopButton = New-ControlButton -Text "Stop all"
-$RefreshButton = New-ControlButton -Text "Refresh"
-$OpenButton = New-ControlButton -Text "Open admin" -Width 92
-$ExitButton = New-ControlButton -Text "Exit"
-
-$ButtonPanel.Controls.Add($StartButton)
-$ButtonPanel.Controls.Add($StopButton)
-$ButtonPanel.Controls.Add($RefreshButton)
-$ButtonPanel.Controls.Add($OpenButton)
-$ButtonPanel.Controls.Add($ExitButton)
 
 $RunningOperations = New-Object System.Collections.ArrayList
 $script:RefreshOperation = $null
@@ -643,11 +721,9 @@ function Get-ProcessExitCodeSafe {
 function Set-OperationButtons {
   param([bool]$Enabled)
 
-  $StartButton.Enabled = $Enabled
-  $StopButton.Enabled = $Enabled
-  $RefreshButton.Enabled = $true
-  $OpenButton.Enabled = $true
-  $ExitButton.Enabled = $true
+  $VibeVisionButton.Enabled = $Enabled
+  $ComfyUIButton.Enabled = $Enabled
+  $OllamaButton.Enabled = $Enabled
 }
 
 function Set-GridRows {
@@ -791,6 +867,23 @@ function Refresh-Grid {
   Start-StatusRefresh -Reason "manual" -Force
 }
 
+function Get-AdminFrontendUrl {
+  $FrontendHost = Get-EnvText -Name "ADMIN_FRONTEND_HOST" -DefaultValue "localhost"
+  $FrontendPort = Get-EnvInt -Name "ADMIN_FRONTEND_PORT" -DefaultValue 18742
+  return "http://$($FrontendHost):$FrontendPort"
+}
+
+function Open-AdminPage {
+  $Url = Get-AdminFrontendUrl
+  try {
+    Add-LogLine "Opening admin page: $Url"
+    Start-Process -FilePath $Url
+  } catch {
+    $StatusLabel.Text = "Open admin page failed."
+    Add-LogLine "Open admin page failed: $($_.Exception.Message)"
+  }
+}
+
 function Start-ControlOperation {
   param(
     [string]$ScriptName,
@@ -874,27 +967,20 @@ function Update-Operations {
   }
 }
 
-$StartButton.Add_Click({
-  Start-ControlOperation -ScriptName "start-all.ps1" -Label "Start all"
+$VibeVisionButton.Add_Click({
+  Start-ControlOperation -ScriptName "restart-vibevision.ps1" -Label "Start/Restart VibeVision"
 })
 
-$StopButton.Add_Click({
-  Start-ControlOperation -ScriptName "stop-all.ps1" -Label "Stop all"
+$ComfyUIButton.Add_Click({
+  Start-ControlOperation -ScriptName "restart-comfyui.ps1" -Label "Start/Restart ComfyUI"
 })
 
-$RefreshButton.Add_Click({
-  Add-LogLine "Refresh requested."
-  Refresh-Grid
+$OllamaButton.Add_Click({
+  Start-ControlOperation -ScriptName "restart-ollama.ps1" -Label "Start/Restart Ollama"
 })
 
-$OpenButton.Add_Click({
-  $Url = "http://$(Get-EnvText -Name "ADMIN_FRONTEND_HOST" -DefaultValue "localhost"):$(Get-EnvInt -Name "ADMIN_FRONTEND_PORT" -DefaultValue 18742)"
-  Add-LogLine "Opening admin frontend: $Url"
-  Start-Process $Url
-})
-
-$ExitButton.Add_Click({
-  $Form.Close()
+$AdminPageButton.Add_Click({
+  Open-AdminPage
 })
 
 $Timer = New-Object System.Windows.Forms.Timer
@@ -910,7 +996,7 @@ $Form.Add_Shown({
   Add-LogLine "Control window opened."
   Refresh-Grid
   if ($StartOnOpen.Checked) {
-    Start-ControlOperation -ScriptName "start-all.ps1" -Label "Start all"
+    Start-ControlOperation -ScriptName "start-all.ps1" -Label "Start missing VibeVision services"
   }
 })
 

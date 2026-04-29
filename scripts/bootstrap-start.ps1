@@ -181,13 +181,22 @@ function Wait-Port {
     [int]$TimeoutSeconds
   )
 
+  Write-Host "Waiting for $Name to listen on port $Port (timeout ${TimeoutSeconds}s)."
   $Deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  $LastProgressAt = Get-Date
   do {
     if (Test-PortListening -Port $Port) {
       Write-Ok "$Name is listening on port $Port."
       return $true
     }
     Start-Sleep -Seconds 2
+
+    $Now = Get-Date
+    if (($Now - $LastProgressAt).TotalSeconds -ge 10) {
+      $RemainingSeconds = [Math]::Max(0, [int][Math]::Ceiling(($Deadline - $Now).TotalSeconds))
+      Write-Host "Still waiting for $Name on port $Port (${RemainingSeconds}s remaining)."
+      $LastProgressAt = $Now
+    }
   } while ((Get-Date) -lt $Deadline)
 
   Write-WarnLine "$Name is not listening on port $Port after ${TimeoutSeconds}s."
@@ -377,7 +386,7 @@ function Test-LlmConfig {
 }
 
 function Start-Services {
-  Write-Step "Starting VibeVision services"
+  Write-Step "Starting missing VibeVision services"
   & (Join-Path $Root "scripts\start-all.ps1") -ConfigPath $ConfigPath -LocalConfigPath $LocalConfigPath
 }
 
@@ -390,9 +399,19 @@ function Show-ServiceStatus {
 
   [void](Wait-Port -Name "VibeVision API" -Port $ApiPort -TimeoutSeconds $WaitSeconds)
   [void](Wait-Port -Name "Admin frontend" -Port $FrontendPort -TimeoutSeconds $WaitSeconds)
-  [void](Wait-Port -Name "ComfyUI" -Port $ComfyPort -TimeoutSeconds $WaitSeconds)
+
+  if (Test-PortListening -Port $ComfyPort) {
+    Write-Ok "ComfyUI is listening on port $ComfyPort."
+  } else {
+    Write-WarnLine "ComfyUI is not listening on port $ComfyPort. Use the control GUI button to start or restart it."
+  }
+
   if (Test-LlmUsesOllama) {
-    [void](Wait-Port -Name "Ollama" -Port $OllamaPort -TimeoutSeconds 5)
+    if (Test-PortListening -Port $OllamaPort) {
+      Write-Ok "Ollama is listening on port $OllamaPort."
+    } else {
+      Write-WarnLine "Ollama is not listening on port $OllamaPort. Use the control GUI button to start or restart it."
+    }
   }
 
   $ApiUrl = "http://$(Get-EnvText -Name "API_HOST" -DefaultValue "127.0.0.1"):$ApiPort"

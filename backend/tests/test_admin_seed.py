@@ -11,7 +11,7 @@ from app.seed import (
     HIDDEN_ADMIN_USERNAME,
     seed_defaults,
 )
-from app.services.error_details import format_exception_details
+from app.services.error_details import append_error_detail, format_exception_details
 
 
 def build_session() -> Session:
@@ -85,3 +85,14 @@ def test_format_exception_details_includes_http_response_body() -> None:
     assert "Request: POST http://127.0.0.1:8401/prompt" in detail
     assert "Response status: 400 Bad Request" in detail
     assert '"error": "missing prompt graph"' in detail
+
+
+def test_append_error_detail_includes_task_id() -> None:
+    message = append_error_detail(
+        "任务已完成，但结果回传到 Telegram 失败。管理员可在后台查看任务输出。",
+        "Telegram API request timed out.",
+        label="详细信息",
+        task_id=42,
+    )
+
+    assert "详细信息: 任务 ID: 42; Telegram API request timed out." in message

@@ -33,11 +33,23 @@ def format_exception_details(exc: BaseException) -> str:
     return "\n".join(_deduplicate(lines))
 
 
-def append_error_detail(message: str, detail: str | None, *, label: str = "Details") -> str:
+def append_error_detail(
+    message: str,
+    detail: str | None,
+    *,
+    label: str = "Details",
+    task_id: int | None = None,
+) -> str:
     clean_detail = _clean_text(detail or "")
-    if not clean_detail:
+    detail_parts: list[str] = []
+    if task_id is not None:
+        detail_parts.append(_task_id_detail(task_id, label))
+    if clean_detail:
+        detail_parts.append(clean_detail)
+    if not detail_parts:
         return message
 
+    clean_detail = "; ".join(detail_parts)
     budget = max(MAX_USER_MESSAGE_CHARS - len(message) - len(label) - 4, 120)
     if len(clean_detail) > budget:
         clean_detail = f"{clean_detail[: budget - 3].rstrip()}..."
@@ -55,6 +67,10 @@ def _response_body_text(response: httpx.Response) -> str | None:
 
 def _clean_text(value: str) -> str:
     return " ".join(value.split())[:MAX_DETAIL_CHARS].strip()
+
+
+def _task_id_detail(task_id: int, label: str) -> str:
+    return f"任务 ID: {task_id}" if label == "详细信息" else f"Task ID: {task_id}"
 
 
 def _deduplicate(lines: list[str]) -> list[str]:

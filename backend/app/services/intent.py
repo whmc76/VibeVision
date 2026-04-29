@@ -227,6 +227,7 @@ class IntentService:
                     base_url=self.settings.ollama_base_url,
                     timeout=20,
                     limits=self._single_connection_limits(),
+                    trust_env=False,
                 ) as client:
                     response = await client.post("/api/generate", json=payload)
                     response.raise_for_status()
@@ -604,6 +605,7 @@ class IntentService:
                     base_url=self.settings.ollama_base_url,
                     timeout=60,
                     limits=self._single_connection_limits(),
+                    trust_env=False,
                 ) as client:
                     response = await client.post("/api/generate", json=payload)
                     response.raise_for_status()
@@ -1194,7 +1196,7 @@ class IntentService:
         return (
             "请先明确选择要生成图片还是视频。"
             "可以直接输入 /photo 或 /p 加描述，或输入 /video 或 /v 加描述；"
-            "也可以在描述里直接写“生成图片...”或“生成视频...”。"
+            "也可以在描述里直接写“生图...”“生成图片...”“生视频...”或“生成视频...”。"
         )
 
     def _clean_prompt_text(self, text: str | None) -> str:

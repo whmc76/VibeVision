@@ -263,6 +263,7 @@ async def process_telegram_update(update: dict, settings: Settings) -> None:
                         "任务创建失败，积分已退回。请检查 ComfyUI 工作流配置。",
                         error_message,
                         label="详细信息",
+                        task_id=task.id,
                     ),
                     inbound.message_id,
                 )
@@ -345,6 +346,7 @@ async def _complete_comfyui_task_locked(
                 "生成任务失败，积分已退回。请检查 ComfyUI 返回结果和节点输出。",
                 detail,
                 label="详细信息",
+                task_id=task_id,
             ),
             reply_to_message_id,
         )
@@ -392,6 +394,7 @@ async def _complete_task_success(
                 "任务已完成，但结果回传到 Telegram 失败。管理员可在后台查看任务输出。",
                 format_exception_details(exc),
                 label="详细信息",
+                task_id=task_id,
             ),
             reply_to_message_id,
         )

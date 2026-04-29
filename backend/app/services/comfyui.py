@@ -12,6 +12,17 @@ from app.models import Workflow
 from app.services.concurrency import concurrency_slot
 from app.services.gpu_memory import comfyui_gpu_scope, schedule_comfyui_gpu_release
 
+_COMFYUI_RETRY_ATTEMPTS = 3
+_COMFYUI_RETRYABLE_STATUS_CODES = {502, 503, 504}
+_COMFYUI_RETRYABLE_EXCEPTIONS = (
+    httpx.ConnectError,
+    httpx.ConnectTimeout,
+    httpx.PoolTimeout,
+    httpx.ReadError,
+    httpx.ReadTimeout,
+    httpx.RemoteProtocolError,
+)
+
 
 class ComfyUIClient:
     def __init__(self, settings: Settings):
@@ -26,17 +37,13 @@ class ComfyUIClient:
     ) -> str:
         try:
             async with concurrency_slot("comfyui", self.settings.comfyui_max_concurrency):
-                async with httpx.AsyncClient(
-                    base_url=self.settings.comfyui_base_url,
-                    timeout=30,
-                    limits=self._single_connection_limits(),
-                ) as client:
+                async with self._client(timeout=30) as client:
                     source_image_name = None
                     if source_media_url and self._template_requires_source_image(workflow.template or {}):
                         source_image_name = await self._upload_source_image(client, source_media_url)
 
                     payload = self._build_payload(workflow, prompt, source_image_name, parameters or {})
-                    response = await client.post("/prompt", json=payload)
+                    response = await self._request(client, "POST", "/prompt", json=payload)
                     response.raise_for_status()
                     data = response.json()
         finally:
@@ -83,7 +90,7 @@ class ComfyUIClient:
         filename = f"vibevision-{uuid4().hex}{extension}"
         files = {"image": (filename, source_response.content, content_type)}
         data = {"overwrite": "true", "type": "input"}
-        response = await client.post("/upload/image", data=data, files=files)
+        response = await self._request(client, "POST", "/upload/image", data=data, files=files)
         response.raise_for_status()
         body = response.json()
         name = body.get("name") or filename
@@ -149,11 +156,7 @@ class ComfyUIClient:
 
         async with comfyui_gpu_scope(self.settings):
             async with concurrency_slot("comfyui", self.settings.comfyui_max_concurrency):
-                async with httpx.AsyncClient(
-                    base_url=self.settings.comfyui_base_url,
-                    timeout=30,
-                    limits=self._single_connection_limits(),
-                ) as client:
+                async with self._client(timeout=30) as client:
                     while asyncio.get_running_loop().time() < deadline:
                         result_urls = await self._get_result_urls(client, prompt_id)
                         if result_urls:
@@ -165,15 +168,11 @@ class ComfyUIClient:
     async def get_result_urls(self, prompt_id: str) -> list[str]:
         async with comfyui_gpu_scope(self.settings):
             async with concurrency_slot("comfyui", self.settings.comfyui_max_concurrency):
-                async with httpx.AsyncClient(
-                    base_url=self.settings.comfyui_base_url,
-                    timeout=30,
-                    limits=self._single_connection_limits(),
-                ) as client:
+                async with self._client(timeout=30) as client:
                     return await self._get_result_urls(client, prompt_id)
 
     async def _get_result_urls(self, client: httpx.AsyncClient, prompt_id: str) -> list[str]:
-        response = await client.get(f"/history/{prompt_id}")
+        response = await self._request(client, "GET", f"/history/{prompt_id}")
         response.raise_for_status()
         return self._extract_result_urls(response.json(), prompt_id)
 
@@ -202,6 +201,40 @@ class ComfyUIClient:
                     result_urls.append(f"{self.settings.comfyui_base_url}/view?{query}")
 
         return result_urls
+
+    def _client(self, *, timeout: int) -> httpx.AsyncClient:
+        return httpx.AsyncClient(
+            base_url=self.settings.comfyui_base_url,
+            timeout=timeout,
+            limits=self._single_connection_limits(),
+            trust_env=False,
+        )
+
+    async def _request(
+        self,
+        client: httpx.AsyncClient,
+        method: str,
+        url: str,
+        **kwargs: Any,
+    ) -> httpx.Response:
+        last_error: httpx.HTTPError | None = None
+        for attempt in range(_COMFYUI_RETRY_ATTEMPTS):
+            try:
+                response = await client.request(method, url, **kwargs)
+            except _COMFYUI_RETRYABLE_EXCEPTIONS as exc:
+                last_error = exc
+            else:
+                if response.status_code not in _COMFYUI_RETRYABLE_STATUS_CODES:
+                    return response
+                if attempt == _COMFYUI_RETRY_ATTEMPTS - 1:
+                    return response
+
+            if attempt < _COMFYUI_RETRY_ATTEMPTS - 1:
+                await asyncio.sleep(min(2**attempt, 3))
+
+        if last_error:
+            raise last_error
+        raise RuntimeError("ComfyUI request failed before a response was received.")
 
     def _single_connection_limits(self) -> httpx.Limits:
         return httpx.Limits(max_connections=1, max_keepalive_connections=1)

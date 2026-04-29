@@ -29,31 +29,28 @@ function Import-VibeVisionConfig {
   }
 }
 
+function Test-PortListening {
+  param([int]$Port)
+  return [bool](Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue)
+}
+
 Import-VibeVisionConfig -Path $ConfigPath
 Import-VibeVisionConfig -Path $LocalConfigPath
 
-if (-not $env:COMFYUI_ROOT) {
-  throw "COMFYUI_ROOT is not configured."
-}
-
-$Port = [int]$env:COMFYUI_PORT
-$Existing = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
-if ($Existing) {
-  Write-Host "ComfyUI is already listening on port $Port."
+$Port = [int]$env:OLLAMA_PORT
+if (Test-PortListening -Port $Port) {
+  Write-Host "Ollama is already listening on port $Port."
   return
 }
 
-$ScriptName = if ($env:COMFYUI_START_SCRIPT) { $env:COMFYUI_START_SCRIPT } else { "run_nvidia_gpu.bat" }
-$ScriptPath = Join-Path $env:COMFYUI_ROOT $ScriptName
-if (-not (Test-Path -LiteralPath $ScriptPath)) {
-  throw "ComfyUI start script not found: $ScriptPath"
+$OllamaCommand = Get-Command "ollama" -ErrorAction SilentlyContinue
+if (-not $OllamaCommand) {
+  throw "Ollama command not found."
 }
 
-Write-Host "Starting ComfyUI backend service on port $Port. This can take a while."
 Start-Process `
-  -FilePath "cmd.exe" `
-  -ArgumentList @("/c", $ScriptName) `
-  -WorkingDirectory $env:COMFYUI_ROOT `
+  -FilePath $OllamaCommand.Source `
+  -ArgumentList @("serve") `
   -WindowStyle Hidden
 
-Write-Host "ComfyUI start requested on port $Port."
+Write-Host "Ollama start requested on port $Port."
