@@ -215,8 +215,14 @@ The high-frequency service monitor keeps Telegram checks local-only for responsi
 
 For image or video generation to complete, ComfyUI must be reachable at the host and port configured in `config/vibevision.env`. This workspace is configured for the local ComfyUI folder `E:\ComfyUI_Feb` and port `8401`.
 
-The default `image.edit` route is wired to `backend/app/workflow_templates/flux2klein_single_edit_api.json`, converted from `Flux2Klein_SingleEdit.json`. It expects the matching ComfyUI custom nodes and model files:
+The default `image.generate` route is wired to `backend/app/workflow_templates/z_image_turbo_text_to_image_api.json`, converted from `zit_nsfw.json`. It expects the matching ComfyUI custom nodes and model files:
 
-- `klein_miracleinNSFWGeneration_10Nvfp4.safetensors`
+- `darkBeast_dbzit9DIMRclaw.safetensors`
+- `qwen_3_4b_fp4_mixed.safetensors`
+- `ae.safetensors`
+
+The default `image.edit` route is wired to `backend/app/workflow_templates/flux2klein_single_edit_api.json`, converted from `Klein_nsfw_nvfp4.json`. It expects the matching ComfyUI custom nodes and model files:
+
+- `klein_darkBeast_dbkBlitzV15.safetensors`
 - `qwen_3_8b_fp4mixed.safetensors`
 - `flux2-vae.safetensors`

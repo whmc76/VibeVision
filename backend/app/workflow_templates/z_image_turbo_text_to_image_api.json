@@ -3,14 +3,14 @@
     "28": {
       "class_type": "UNETLoader",
       "inputs": {
-        "unet_name": "z_image_turbo_nvfp4.safetensors",
+        "unet_name": "darkBeast_dbzit9DIMRclaw.safetensors",
         "weight_dtype": "default"
       }
     },
     "30": {
       "class_type": "CLIPLoader",
       "inputs": {
-        "clip_name": "qwen_3_4b.safetensors",
+        "clip_name": "qwen_3_4b_fp4_mixed.safetensors",
         "type": "lumina2",
         "device": "default"
       }
@@ -43,8 +43,8 @@
     "13": {
       "class_type": "EmptySD3LatentImage",
       "inputs": {
-        "width": 1152,
-        "height": 1536,
+        "width": 1200,
+        "height": 1600,
         "batch_size": 1
       },
       "_meta": {
@@ -83,7 +83,7 @@
     "9": {
       "class_type": "SaveImage",
       "inputs": {
-        "filename_prefix": "VibeVision_Z_Image_Turbo",
+        "filename_prefix": "nsfw/z-image-turbo",
         "images": ["8", 0]
       }
     }

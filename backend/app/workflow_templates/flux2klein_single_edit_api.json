@@ -12,7 +12,7 @@
     "104": {
       "class_type": "UNETLoader",
       "inputs": {
-        "unet_name": "klein_miracleinNSFWGeneration_10Nvfp4.safetensors",
+        "unet_name": "klein_darkBeast_dbkBlitzV15.safetensors",
         "weight_dtype": "default"
       }
     },
@@ -57,7 +57,7 @@
     "100": {
       "class_type": "KSamplerSelect",
       "inputs": {
-        "sampler_name": "res_multistep"
+        "sampler_name": "euler"
       }
     },
     "103": {
@@ -118,7 +118,7 @@
     "114": {
       "class_type": "Flux2Scheduler",
       "inputs": {
-        "steps": 8,
+        "steps": 4,
         "width": ["106", 0],
         "height": ["106", 1]
       }
@@ -143,7 +143,7 @@
     "94": {
       "class_type": "SaveImage",
       "inputs": {
-        "filename_prefix": "VibeVision_Flux2Klein",
+        "filename_prefix": "nsfw/Flux2-Klein-9b",
         "images": ["102", 0]
       }
     }
