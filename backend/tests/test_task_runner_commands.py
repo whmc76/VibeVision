@@ -1,10 +1,17 @@
+import asyncio
+
 from app.models import TaskKind
 from app.services.intent import TargetOutput
 from app.services.task_runner import (
+    _attach_source_media_to_pending_instruction,
+    _clear_pending_followup_state_for_tests,
     _parse_generation_request,
+    _remember_recent_source_media,
+    _resolve_followup_source_media,
     _target_output_from_command,
     _task_kind_label,
 )
+from app.services.telegram import TelegramInboundMessage
 
 
 def test_generation_commands_resolve_target_output() -> None:
@@ -55,3 +62,65 @@ def test_task_kind_label_uses_user_facing_task_names() -> None:
     assert _task_kind_label(TaskKind.image_edit) == "图像编辑任务"
     assert _task_kind_label(TaskKind.video_text_to_video) == "视频生成任务"
     assert _task_kind_label(TaskKind.video_image_to_video) == "图生视频任务"
+
+
+def test_followup_source_media_can_be_used_by_next_instruction() -> None:
+    async def scenario() -> None:
+        await _clear_pending_followup_state_for_tests()
+        await _remember_recent_source_media(
+            _inbound_message(message_id="10", source_file_id="photo-file")
+        )
+
+        resolved = await _resolve_followup_source_media(
+            _inbound_message(message_id="11", text="生图 脱衣"),
+            TargetOutput.image,
+            wait_seconds=0,
+        )
+
+        assert resolved.source_file_id == "photo-file"
+        assert resolved.source_media_type == "image"
+
+    asyncio.run(scenario())
+
+
+def test_followup_source_media_can_arrive_after_instruction() -> None:
+    async def scenario() -> None:
+        await _clear_pending_followup_state_for_tests()
+        instruction = _inbound_message(message_id="10", text="生图 脱衣")
+        resolver = asyncio.create_task(
+            _resolve_followup_source_media(
+                instruction,
+                TargetOutput.image,
+                wait_seconds=0.5,
+            )
+        )
+        await asyncio.sleep(0)
+
+        attached = await _attach_source_media_to_pending_instruction(
+            _inbound_message(message_id="11", source_file_id="photo-file")
+        )
+        resolved = await resolver
+
+        assert attached is True
+        assert resolved.source_file_id == "photo-file"
+        assert resolved.source_media_type == "image"
+
+    asyncio.run(scenario())
+
+
+def _inbound_message(
+    *,
+    message_id: str,
+    text: str | None = None,
+    source_file_id: str | None = None,
+) -> TelegramInboundMessage:
+    return TelegramInboundMessage(
+        telegram_id="123",
+        chat_id="456",
+        message_id=message_id,
+        username="alice",
+        display_name="Alice",
+        text=text,
+        source_file_id=source_file_id,
+        source_media_type="image" if source_file_id else None,
+    )

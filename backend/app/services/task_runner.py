@@ -1,3 +1,7 @@
+import asyncio
+import time
+from dataclasses import dataclass, replace
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -33,6 +37,29 @@ from app.services.telegram import TelegramClient, TelegramUpdateError
 from app.services.users import get_or_create_telegram_user
 
 PENDING_SOURCE_MEDIA_URL = "telegram://pending-source-media"
+FOLLOWUP_SOURCE_MEDIA_TTL_SECONDS = 120.0
+FOLLOWUP_SOURCE_MEDIA_WAIT_SECONDS = 3.0
+
+
+@dataclass
+class _PendingSourceMedia:
+    source_file_id: str
+    source_media_type: str | None
+    source_message_id: str
+    created_at: float
+
+
+@dataclass
+class _PendingInstruction:
+    target_output: TargetOutput
+    created_at: float
+    event: asyncio.Event
+    source_media: _PendingSourceMedia | None = None
+
+
+_pending_followup_lock = asyncio.Lock()
+_recent_source_media: dict[tuple[str, str], _PendingSourceMedia] = {}
+_pending_instructions: dict[tuple[str, str], _PendingInstruction] = {}
 
 
 async def process_telegram_update(update: dict, settings: Settings) -> None:
@@ -56,6 +83,17 @@ async def process_telegram_update(update: dict, settings: Settings) -> None:
         await telegram.send_message(
             inbound.chat_id,
             _render_help_message(include_welcome=is_start_command(inbound.text)),
+            inbound.message_id,
+        )
+        return
+
+    if inbound.source_file_id and not inbound.text:
+        if await _attach_source_media_to_pending_instruction(inbound):
+            return
+        await _remember_recent_source_media(inbound)
+        await telegram.send_message(
+            inbound.chat_id,
+            "已收到图片。请继续发送 /photo <描述>、/video <描述>，或直接发送“生图/改图/图生视频 + 要求”。",
             inbound.message_id,
         )
         return
@@ -121,6 +159,13 @@ async def process_telegram_update(update: dict, settings: Settings) -> None:
             inbound.message_id,
         )
         return
+
+    if effective_text and not inbound.source_file_id:
+        inbound = await _resolve_followup_source_media(
+            inbound,
+            explicit_target,
+            wait_seconds=FOLLOWUP_SOURCE_MEDIA_WAIT_SECONDS,
+        )
 
     preflight_payload = BotMessageRequest(
         telegram_id=inbound.telegram_id,
@@ -520,3 +565,138 @@ def _load_active_workflows() -> list[Workflow]:
             )
     except Exception:
         return []
+
+
+async def _attach_source_media_to_pending_instruction(inbound) -> bool:
+    if not inbound.source_file_id:
+        return False
+
+    key = _followup_key(inbound)
+    async with _pending_followup_lock:
+        _prune_pending_followup_state()
+        pending = _pending_instructions.get(key)
+        if not pending or not _is_source_media_compatible(
+            pending.target_output,
+            inbound.source_media_type,
+        ):
+            return False
+
+        pending.source_media = _build_pending_source_media(inbound)
+        pending.event.set()
+        return True
+
+
+async def _remember_recent_source_media(inbound) -> None:
+    if not inbound.source_file_id:
+        return
+
+    key = _followup_key(inbound)
+    async with _pending_followup_lock:
+        _prune_pending_followup_state()
+        _recent_source_media[key] = _build_pending_source_media(inbound)
+
+
+async def _resolve_followup_source_media(
+    inbound,
+    target_output: TargetOutput,
+    *,
+    wait_seconds: float,
+):
+    media = await _pop_recent_source_media(inbound, target_output)
+    if media:
+        return _with_source_media(inbound, media)
+
+    if wait_seconds <= 0:
+        return inbound
+
+    pending = await _register_pending_instruction(inbound, target_output)
+    try:
+        await asyncio.wait_for(pending.event.wait(), timeout=wait_seconds)
+    except TimeoutError:
+        pass
+    finally:
+        await _remove_pending_instruction(inbound, pending)
+
+    if pending.source_media:
+        return _with_source_media(inbound, pending.source_media)
+    return inbound
+
+
+async def _pop_recent_source_media(inbound, target_output: TargetOutput) -> _PendingSourceMedia | None:
+    key = _followup_key(inbound)
+    async with _pending_followup_lock:
+        _prune_pending_followup_state()
+        media = _recent_source_media.get(key)
+        if not media or not _is_source_media_compatible(target_output, media.source_media_type):
+            return None
+        return _recent_source_media.pop(key)
+
+
+async def _register_pending_instruction(inbound, target_output: TargetOutput) -> _PendingInstruction:
+    key = _followup_key(inbound)
+    pending = _PendingInstruction(
+        target_output=target_output,
+        created_at=time.monotonic(),
+        event=asyncio.Event(),
+    )
+    async with _pending_followup_lock:
+        _prune_pending_followup_state()
+        _pending_instructions[key] = pending
+    return pending
+
+
+async def _remove_pending_instruction(inbound, pending: _PendingInstruction) -> None:
+    key = _followup_key(inbound)
+    async with _pending_followup_lock:
+        if _pending_instructions.get(key) is pending:
+            _pending_instructions.pop(key, None)
+
+
+def _build_pending_source_media(inbound) -> _PendingSourceMedia:
+    return _PendingSourceMedia(
+        source_file_id=inbound.source_file_id,
+        source_media_type=inbound.source_media_type,
+        source_message_id=inbound.message_id,
+        created_at=time.monotonic(),
+    )
+
+
+def _with_source_media(inbound, media: _PendingSourceMedia):
+    return replace(
+        inbound,
+        source_file_id=media.source_file_id,
+        source_media_type=media.source_media_type,
+    )
+
+
+def _followup_key(inbound) -> tuple[str, str]:
+    return inbound.chat_id, inbound.telegram_id
+
+
+def _is_source_media_compatible(
+    target_output: TargetOutput,
+    source_media_type: str | None,
+) -> bool:
+    if not source_media_type:
+        return False
+    if target_output == TargetOutput.image:
+        return source_media_type == "image"
+    if target_output == TargetOutput.video:
+        return source_media_type in {"image", "video"}
+    return False
+
+
+def _prune_pending_followup_state() -> None:
+    cutoff = time.monotonic() - FOLLOWUP_SOURCE_MEDIA_TTL_SECONDS
+    for key, media in list(_recent_source_media.items()):
+        if media.created_at < cutoff:
+            _recent_source_media.pop(key, None)
+    for key, pending in list(_pending_instructions.items()):
+        if pending.created_at < cutoff:
+            _pending_instructions.pop(key, None)
+
+
+async def _clear_pending_followup_state_for_tests() -> None:
+    async with _pending_followup_lock:
+        _recent_source_media.clear()
+        _pending_instructions.clear()

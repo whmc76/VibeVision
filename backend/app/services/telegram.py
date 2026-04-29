@@ -22,9 +22,7 @@ def build_remove_keyboard_markup() -> dict[str, bool]:
 def build_bot_commands() -> list[dict[str, str]]:
     return [
         {"command": "photo", "description": "照片工作流"},
-        {"command": "p", "description": "照片工作流快捷命令"},
         {"command": "video", "description": "视频工作流"},
-        {"command": "v", "description": "视频工作流快捷命令"},
         {"command": "check", "description": "套餐和剩余点数"},
         {"command": "start", "description": "欢迎与使用说明"},
     ]
