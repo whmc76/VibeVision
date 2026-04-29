@@ -77,12 +77,16 @@ function Get-LlmPromptProvider {
   return (Get-EnvText -Name "LLM_PROMPT_PROVIDER" -DefaultValue (Get-LlmProvider)).Trim().ToLowerInvariant()
 }
 
+function Get-LlmVisionProvider {
+  return (Get-EnvText -Name "LLM_VISION_PROVIDER" -DefaultValue "minimax_mcp").Trim().ToLowerInvariant()
+}
+
 function Test-LlmUsesOllama {
-  return (Get-LlmLogicProvider) -eq "ollama" -or (Get-LlmPromptProvider) -eq "ollama"
+  return (Get-LlmLogicProvider) -eq "ollama" -or (Get-LlmPromptProvider) -eq "ollama" -or (Get-LlmVisionProvider) -eq "ollama"
 }
 
 function Test-LlmUsesMiniMax {
-  return (Get-LlmLogicProvider) -eq "minimax" -or (Get-LlmPromptProvider) -eq "minimax"
+  return (Get-LlmLogicProvider) -eq "minimax" -or (Get-LlmPromptProvider) -eq "minimax" -or (Get-LlmVisionProvider) -eq "minimax_mcp"
 }
 
 function Get-EnvInt {
@@ -200,8 +204,10 @@ function Ensure-LocalConfig {
 # This file is ignored by git.
 LLM_LOGIC_PROVIDER=minimax
 LLM_PROMPT_PROVIDER=ollama
+LLM_VISION_PROVIDER=minimax_mcp
 TELEGRAM_BOT_TOKEN=
 TELEGRAM_WEBHOOK_SECRET=
+TELEGRAM_POLLER_MAX_WORKERS=4
 MINIMAX_API_KEY=
 "@
   Set-Content -LiteralPath $LocalConfigPath -Value $Template -Encoding UTF8

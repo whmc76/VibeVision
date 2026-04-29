@@ -73,12 +73,16 @@ function Get-LlmPromptProvider {
   return (Get-EnvText -Name "LLM_PROMPT_PROVIDER" -DefaultValue (Get-LlmProvider)).Trim().ToLowerInvariant()
 }
 
+function Get-LlmVisionProvider {
+  return (Get-EnvText -Name "LLM_VISION_PROVIDER" -DefaultValue "minimax_mcp").Trim().ToLowerInvariant()
+}
+
 function Test-LlmUsesOllama {
-  return (Get-LlmLogicProvider) -eq "ollama" -or (Get-LlmPromptProvider) -eq "ollama"
+  return (Get-LlmLogicProvider) -eq "ollama" -or (Get-LlmPromptProvider) -eq "ollama" -or (Get-LlmVisionProvider) -eq "ollama"
 }
 
 function Test-LlmUsesMiniMax {
-  return (Get-LlmLogicProvider) -eq "minimax" -or (Get-LlmPromptProvider) -eq "minimax"
+  return (Get-LlmLogicProvider) -eq "minimax" -or (Get-LlmPromptProvider) -eq "minimax" -or (Get-LlmVisionProvider) -eq "minimax_mcp"
 }
 
 function Get-MiniMaxModelDisplay {

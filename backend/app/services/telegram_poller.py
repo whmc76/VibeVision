@@ -64,16 +64,20 @@ class SingleInstanceLock:
 
 
 class TelegramPoller:
-    def __init__(self, settings: Settings, max_workers: int = 1):
+    def __init__(self, settings: Settings, max_workers: int | None = None):
         self.settings = settings
         self.telegram = TelegramClient(settings)
-        self._semaphore = asyncio.Semaphore(max_workers)
+        self.max_workers = max(1, max_workers or settings.telegram_poller_max_workers)
+        self._semaphore = asyncio.Semaphore(self.max_workers)
         self._tasks: set[asyncio.Task[None]] = set()
 
     async def run(self) -> None:
         await self.telegram.delete_webhook(drop_pending_updates=False)
         await self.telegram.set_my_commands()
-        logger.info("Telegram webhook disabled; starting local getUpdates polling.")
+        logger.info(
+            "Telegram webhook disabled; starting local getUpdates polling with %s workers.",
+            self.max_workers,
+        )
 
         offset: int | None = None
         while True:

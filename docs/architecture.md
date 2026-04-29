@@ -15,7 +15,7 @@
 - `routers/telegram.py`: channel-specific Telegram webhook handling.
 - `routers/admin.py`: operator API for the management frontend.
 - `services/orchestrator.py`: workflow catalog loading, credit reservation, and dispatch validation.
-- `services/intent.py`: LLM workflow router, prompt enhancer, role-specific provider dispatch, and fallback selector.
+- `services/intent.py`: LLM workflow router, MiniMax Coding Plan MCP vision bridge, prompt enhancer, role-specific provider dispatch, and fallback selector.
 - `services/concurrency.py`: process-local async semaphores for serializing constrained backends such as Ollama and ComfyUI.
 - `services/comfyui.py`: ComfyUI prompt submission.
 - `services/credits.py`: ledger-safe credit reservation and adjustment.
@@ -34,4 +34,4 @@
 - Use signed admin authentication before exposing the frontend publicly.
 - Add idempotency keys around Telegram updates and credit reservation.
 - Keep ComfyUI workflow JSON templates versioned so old tasks remain explainable.
-- Keep ports, local service endpoints, LLM role provider defaults, and backend concurrency limits centralized in `config/vibevision.env`; keep private API keys in ignored `config/vibevision.local.env`.
+- Keep ports, local service endpoints, LLM role provider defaults, Telegram poller worker count, and backend concurrency limits centralized in `config/vibevision.env`; keep private API keys in ignored `config/vibevision.local.env`.

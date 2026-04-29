@@ -51,7 +51,8 @@ Write-Host "Cleaning existing VibeVision service processes before start."
 $LlmProvider = if ($env:LLM_PROVIDER) { $env:LLM_PROVIDER.Trim().ToLowerInvariant() } else { "ollama" }
 $LogicProvider = if ($env:LLM_LOGIC_PROVIDER) { $env:LLM_LOGIC_PROVIDER.Trim().ToLowerInvariant() } else { $LlmProvider }
 $PromptProvider = if ($env:LLM_PROMPT_PROVIDER) { $env:LLM_PROMPT_PROVIDER.Trim().ToLowerInvariant() } else { $LlmProvider }
-$NeedsOllama = $LogicProvider -eq "ollama" -or $PromptProvider -eq "ollama"
+$VisionProvider = if ($env:LLM_VISION_PROVIDER) { $env:LLM_VISION_PROVIDER.Trim().ToLowerInvariant() } else { "minimax_mcp" }
+$NeedsOllama = $LogicProvider -eq "ollama" -or $PromptProvider -eq "ollama" -or $VisionProvider -eq "ollama"
 
 if (-not $NeedsOllama) {
   Write-Host "No LLM role uses Ollama; skipping Ollama start."

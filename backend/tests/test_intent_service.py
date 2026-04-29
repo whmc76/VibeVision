@@ -332,3 +332,20 @@ def test_logic_and_prompt_providers_can_be_split(monkeypatch) -> None:
 
     assert result.prompt == "enhanced prompt"
     assert calls == ["minimax-logic", "ollama-prompt"]
+
+
+def test_router_prompt_includes_vision_context() -> None:
+    service = build_service()
+    route = service._build_workflow_routes(build_workflows())[0]
+
+    prompt = service._router_user_prompt(
+        text="生成图片",
+        workflow_routes=[route],
+        media_attached=True,
+        source_media_type="image",
+        target_output=service.resolve_target_output("生成图片"),
+        vision_image_attached=False,
+        vision_context="A woman in a red dress standing by a window.",
+    )
+
+    assert "vision_context=A woman in a red dress standing by a window." in prompt

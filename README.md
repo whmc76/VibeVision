@@ -105,15 +105,18 @@ Default LLM role split:
 LLM_PROVIDER=minimax
 LLM_LOGIC_PROVIDER=minimax
 LLM_PROMPT_PROVIDER=ollama
+LLM_VISION_PROVIDER=minimax_mcp
 MINIMAX_BASE_URL=https://api.minimaxi.com/v1
+MINIMAX_API_HOST=https://api.minimaxi.com
 MINIMAX_MODEL=codex-MiniMax-M2.7
 MINIMAX_LOGIC_MODEL=codex-MiniMax-M2.7
 OLLAMA_PROMPT_MODEL=huihui_ai/qwen3.5-abliterated:9b
 OLLAMA_MAX_CONCURRENCY=1
 COMFYUI_MAX_CONCURRENCY=1
+TELEGRAM_POLLER_MAX_WORKERS=4
 ```
 
-Put `MINIMAX_API_KEY` in ignored `config/vibevision.local.env`. The MiniMax logic path uses the OpenAI-compatible `/chat/completions` API, matching the hosted M2.7 coding-plan setup. Prompt enhancement uses local Ollama qwen3.5 9b by default so prompt expansion has a dedicated local context budget.
+Put `MINIMAX_API_KEY` in ignored `config/vibevision.local.env`. The MiniMax logic path uses the OpenAI-compatible `/chat/completions` API, matching the hosted M2.7 coding-plan setup. Vision understanding uses the MiniMax Coding Plan MCP-compatible `/v1/coding_plan/vlm` endpoint. Prompt enhancement uses local Ollama qwen3.5 9b by default so prompt expansion has a dedicated local context budget.
 
 Optional MiniMax model split:
 
@@ -174,7 +177,7 @@ The `/api/telegram/webhook` endpoint is still available when you explicitly want
 
 1. Parse Telegram text, caption, image, document, video, or animation messages.
 2. Resolve uploaded media with Telegram `getFile`.
-3. Route the request with the configured LLM logic model against the active workflow catalog, then enhance the final generation prompt with the prompt model; image inputs are sent to Ollama VLM when either LLM role uses Ollama, with fallback workflow selection if the LLM is unavailable.
+3. Route the request with the configured LLM logic model against the active workflow catalog, using MiniMax Coding Plan MCP vision for attached images by default, then enhance the final generation prompt with the prompt model; image inputs are sent to Ollama VLM only when `LLM_VISION_PROVIDER=ollama`, with fallback workflow selection if the LLM is unavailable.
 4. Reserve credits and submit the selected workflow to ComfyUI.
 5. Poll ComfyUI history until outputs appear or the configured timeout is reached.
 6. Upload generated media back to the Telegram chat and update task status.

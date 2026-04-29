@@ -224,12 +224,14 @@ class ServiceMonitor:
         return (
             self.settings.llm_logic_provider_name == "minimax"
             or self.settings.llm_prompt_provider_name == "minimax"
+            or self.settings.llm_vision_provider_name == "minimax_mcp"
         )
 
     def _llm_uses_ollama(self) -> bool:
         return (
             self.settings.llm_logic_provider_name == "ollama"
             or self.settings.llm_prompt_provider_name == "ollama"
+            or self.settings.llm_vision_provider_name == "ollama"
         )
 
     async def _telegram_status(self) -> ServiceStatus:

@@ -69,18 +69,13 @@ class IntentService:
 
         media_attached = has_image or bool(source_media_url)
         normalized_media_type = self.normalize_media_type(source_media_type)
-        images = (
-            await self._load_ollama_images(source_media_url)
-            if (
-                self.settings.llm_logic_provider_name == "ollama"
-                or self.settings.llm_prompt_provider_name == "ollama"
-            )
-            and source_media_url
-            and normalized_media_type != "video"
-            else []
+        images, vision_context = await self._load_visual_inputs(
+            source_media_url=source_media_url,
+            source_media_type=normalized_media_type,
+            user_text=content,
         )
 
-        if not content and media_attached and not images and not resolved_target:
+        if not content and media_attached and not images and not vision_context and not resolved_target:
             workflow = self._pick_workflow(
                 workflow_routes,
                 preferred_kinds=(TaskKind.prompt_expand, TaskKind.image_edit),
@@ -102,6 +97,7 @@ class IntentService:
                 source_media_type=normalized_media_type,
                 target_output=resolved_target,
                 images=images,
+                vision_context=vision_context,
             )
         except (httpx.HTTPError, ValueError, KeyError, json.JSONDecodeError):
             intent = self._fallback_classify(
@@ -118,6 +114,7 @@ class IntentService:
             media_attached=media_attached,
             source_media_type=normalized_media_type,
             images=images,
+            vision_context=vision_context,
         )
 
     def resolve_target_output(
@@ -198,6 +195,7 @@ class IntentService:
         source_media_type: str | None,
         target_output: TargetOutput | None,
         images: list[str],
+        vision_context: str,
     ) -> IntentResult:
         logic_model = self.settings.ollama_logic_model_name
         if not logic_model:
@@ -214,6 +212,7 @@ class IntentService:
                 source_media_type=source_media_type,
                 target_output=target_output,
                 vision_image_attached=bool(images),
+                vision_context=vision_context,
                 include_system_prompt=True,
             ),
         }
@@ -247,6 +246,7 @@ class IntentService:
         media_attached: bool,
         source_media_type: str | None,
         target_output: TargetOutput | None,
+        vision_context: str,
     ) -> IntentResult:
         logic_model = self.settings.minimax_logic_model_name
         if not logic_model:
@@ -267,6 +267,7 @@ class IntentService:
                         source_media_type=source_media_type,
                         target_output=target_output,
                         vision_image_attached=False,
+                        vision_context=vision_context,
                     ),
                 },
             ],
@@ -326,6 +327,7 @@ class IntentService:
         source_media_type: str | None,
         target_output: TargetOutput | None,
         vision_image_attached: bool,
+        vision_context: str = "",
         include_system_prompt: bool = False,
     ) -> str:
         workflow_catalog = "\n".join(
@@ -343,6 +345,7 @@ class IntentService:
             f"media_attached={media_attached}\n"
             f"source_media_type={source_media_type or 'none'}\n"
             f"vision_image_attached={vision_image_attached}\n"
+            f"vision_context={self._clean_prompt_text(vision_context) or 'none'}\n"
             f"user_request={text or 'No text request was provided.'}\n"
             "JSON:"
         )
@@ -394,6 +397,7 @@ class IntentService:
         media_attached: bool,
         source_media_type: str | None,
         images: list[str],
+        vision_context: str,
     ) -> IntentResult:
         workflow = next(
             (route for route in workflow_routes if route.workflow_key == intent.workflow_key),
@@ -408,6 +412,7 @@ class IntentService:
             media_attached=media_attached,
             source_media_type=source_media_type,
             images=images,
+            vision_context=vision_context,
         )
         return IntentResult(
             workflow_key=intent.workflow_key,
@@ -427,6 +432,7 @@ class IntentService:
         media_attached: bool,
         source_media_type: str | None,
         images: list[str],
+        vision_context: str,
     ) -> str:
         base_prompt = (
             self._clean_prompt_text(router_prompt)
@@ -444,6 +450,7 @@ class IntentService:
                 media_attached=media_attached,
                 source_media_type=source_media_type,
                 images=images,
+                vision_context=vision_context,
             )
         except (httpx.HTTPError, ValueError):
             return base_prompt
@@ -457,6 +464,7 @@ class IntentService:
         source_media_type: str | None,
         target_output: TargetOutput | None,
         images: list[str],
+        vision_context: str,
     ) -> IntentResult:
         if self.settings.llm_logic_provider_name == "minimax":
             return await self._classify_with_minimax(
@@ -465,6 +473,7 @@ class IntentService:
                 media_attached=media_attached,
                 source_media_type=source_media_type,
                 target_output=target_output,
+                vision_context=vision_context,
             )
         return await self._classify_with_ollama(
             text=text,
@@ -473,6 +482,7 @@ class IntentService:
             source_media_type=source_media_type,
             target_output=target_output,
             images=images,
+            vision_context=vision_context,
         )
 
     async def _enhance_prompt_with_llm(
@@ -484,6 +494,7 @@ class IntentService:
         media_attached: bool,
         source_media_type: str | None,
         images: list[str],
+        vision_context: str,
     ) -> str:
         if self.settings.llm_prompt_provider_name == "minimax":
             return await self._enhance_prompt_with_minimax(
@@ -492,6 +503,7 @@ class IntentService:
                 router_prompt=router_prompt,
                 media_attached=media_attached,
                 source_media_type=source_media_type,
+                vision_context=vision_context,
             )
         return await self._enhance_prompt_with_ollama(
             workflow=workflow,
@@ -500,6 +512,7 @@ class IntentService:
             media_attached=media_attached,
             source_media_type=source_media_type,
             images=images,
+            vision_context=vision_context,
         )
 
     async def _enhance_prompt_with_minimax(
@@ -510,6 +523,7 @@ class IntentService:
         router_prompt: str,
         media_attached: bool,
         source_media_type: str | None,
+        vision_context: str,
     ) -> str:
         prompt_model = self.settings.minimax_prompt_model_name
         if not prompt_model:
@@ -529,6 +543,7 @@ class IntentService:
                         router_prompt=router_prompt,
                         media_attached=media_attached,
                         source_media_type=source_media_type,
+                        vision_context=vision_context,
                     ),
                 },
             ],
@@ -555,6 +570,7 @@ class IntentService:
         media_attached: bool,
         source_media_type: str | None,
         images: list[str],
+        vision_context: str,
     ) -> str:
         prompt_model = self.settings.ollama_prompt_model_name
         if not prompt_model:
@@ -571,6 +587,7 @@ class IntentService:
                     router_prompt=router_prompt,
                     media_attached=media_attached,
                     source_media_type=source_media_type,
+                    vision_context=vision_context,
                 )}"
             ),
         }
@@ -616,12 +633,14 @@ class IntentService:
         router_prompt: str,
         media_attached: bool,
         source_media_type: str | None,
+        vision_context: str = "",
     ) -> str:
         return (
             f"workflow_kind={workflow.kind.value}\n"
             f"target_output={workflow.target_output.value if workflow.target_output else 'none'}\n"
             f"media_attached={media_attached}\n"
             f"source_media_type={source_media_type or 'none'}\n"
+            f"vision_context={self._clean_prompt_text(vision_context) or 'none'}\n"
             f"workflow_note={self._prompt_enhancement_note_for(workflow)}\n"
             f"router_prompt_brief={self._clean_prompt_text(router_prompt) or 'none'}\n"
             f"user_request={self._clean_prompt_text(user_text) or 'none'}\n"
@@ -632,6 +651,13 @@ class IntentService:
         return {
             "Authorization": f"Bearer {self.settings.minimax_api_key}",
             "Content-Type": "application/json",
+        }
+
+    def _minimax_mcp_headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.settings.minimax_api_key}",
+            "Content-Type": "application/json",
+            "MM-API-Source": "vibevision-coding-plan-mcp-vision",
         }
 
     def _single_connection_limits(self) -> httpx.Limits:
@@ -673,6 +699,99 @@ class IntentService:
 
     def _strip_thinking_text(self, text: str) -> str:
         return re.sub(r"<think>.*?</think>", "", text, flags=re.IGNORECASE | re.DOTALL).strip()
+
+    async def _load_visual_inputs(
+        self,
+        *,
+        source_media_url: str | None,
+        source_media_type: str | None,
+        user_text: str,
+    ) -> tuple[list[str], str]:
+        if not source_media_url or source_media_type == "video":
+            return [], ""
+
+        provider = self.settings.llm_vision_provider_name
+        if provider == "ollama":
+            return await self._load_ollama_images(source_media_url), ""
+        if provider == "minimax_mcp":
+            try:
+                return [], await self._understand_image_with_minimax_mcp(
+                    source_media_url=source_media_url,
+                    user_text=user_text,
+                )
+            except (httpx.HTTPError, ValueError, KeyError):
+                return [], ""
+        return [], ""
+
+    async def _understand_image_with_minimax_mcp(
+        self,
+        *,
+        source_media_url: str,
+        user_text: str,
+    ) -> str:
+        if not self.settings.minimax_api_key:
+            raise ValueError("MINIMAX_API_KEY is not configured.")
+
+        image_url = await self._load_minimax_image_data_url(source_media_url)
+        prompt = (
+            "Analyze this image for an AI media generation workflow. Summarize only practical "
+            "visual facts that help route and prompt the task: subject, identity-preserving traits, "
+            "pose, composition, environment, clothing, style, lighting, and obvious edit targets. "
+            "Keep it concise and do not add safety commentary.\n"
+            f"User request: {self._clean_prompt_text(user_text) or 'none'}"
+        )
+        payload = {"prompt": prompt, "image_url": image_url}
+        async with httpx.AsyncClient(
+            base_url=self.settings.minimax_api_host,
+            headers=self._minimax_mcp_headers(),
+            timeout=self.settings.minimax_vision_timeout_seconds,
+        ) as client:
+            response = await client.post("/v1/coding_plan/vlm", json=payload)
+            response.raise_for_status()
+            body = response.json()
+        return self._extract_minimax_mcp_text(body)
+
+    async def _load_minimax_image_data_url(self, source_media_url: str) -> str:
+        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+            async with client.stream("GET", source_media_url) as response:
+                response.raise_for_status()
+                content_type = response.headers.get("content-type", "").lower()
+                if not content_type.startswith("image/"):
+                    raise ValueError("Source media is not an image.")
+
+                chunks: list[bytes] = []
+                total_bytes = 0
+                async for chunk in response.aiter_bytes():
+                    total_bytes += len(chunk)
+                    if total_bytes > self.settings.minimax_vision_max_bytes:
+                        raise ValueError("Source image is too large for MiniMax vision.")
+                    chunks.append(chunk)
+
+        if not chunks:
+            raise ValueError("Source image was empty.")
+        encoded = base64.b64encode(b"".join(chunks)).decode("ascii")
+        return f"data:{content_type};base64,{encoded}"
+
+    def _extract_minimax_mcp_text(self, body: dict[str, Any]) -> str:
+        for key in ("content", "text", "response", "description"):
+            value = body.get(key)
+            if isinstance(value, str) and value.strip():
+                return self._strip_thinking_text(value)
+
+        data = body.get("data")
+        if isinstance(data, dict):
+            for key in ("content", "text", "response", "description"):
+                value = data.get(key)
+                if isinstance(value, str) and value.strip():
+                    return self._strip_thinking_text(value)
+
+        output = body.get("output")
+        if isinstance(output, dict):
+            text = output.get("text")
+            if isinstance(text, str) and text.strip():
+                return self._strip_thinking_text(text)
+
+        raise ValueError("MiniMax MCP vision response did not contain text.")
 
     async def _load_ollama_images(self, source_media_url: str) -> list[str]:
         try:

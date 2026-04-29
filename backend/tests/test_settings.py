@@ -51,3 +51,10 @@ def test_settings_default_concurrency_limits_are_serial_for_ollama_and_comfyui()
 
     assert settings.ollama_max_concurrency == 1
     assert settings.comfyui_max_concurrency == 1
+    assert settings.telegram_poller_max_workers == 4
+
+
+def test_settings_supports_minimax_mcp_vision_provider() -> None:
+    settings = Settings(llm_vision_provider="coding-plan")
+
+    assert settings.llm_vision_provider_name == "minimax_mcp"

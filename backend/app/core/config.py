@@ -15,6 +15,7 @@ class Settings(BaseSettings):
     llm_provider: str = "ollama"
     llm_logic_provider: str = ""
     llm_prompt_provider: str = ""
+    llm_vision_provider: str = ""
     api_host: str = "127.0.0.1"
     api_port: int = 18751
     admin_frontend_host: str = "127.0.0.1"
@@ -29,11 +30,14 @@ class Settings(BaseSettings):
     ollama_vision_max_bytes: int = 8_000_000
     ollama_max_concurrency: int = 1
     minimax_base_url: str = "https://api.minimaxi.com/v1"
+    minimax_api_host: str = "https://api.minimaxi.com"
     minimax_api_key: str = Field(default="", repr=False)
     minimax_model: str = "codex-MiniMax-M2.7"
     minimax_logic_model: str = ""
     minimax_prompt_model: str = ""
     minimax_timeout_seconds: int = 60
+    minimax_vision_timeout_seconds: int = 60
+    minimax_vision_max_bytes: int = 8_000_000
     comfyui_host: str = "127.0.0.1"
     comfyui_port: int = 8401
     comfyui_root: str = ""
@@ -41,6 +45,7 @@ class Settings(BaseSettings):
     comfyui_max_concurrency: int = 1
     telegram_bot_token: str = ""
     telegram_webhook_secret: str = Field(default="", repr=False)
+    telegram_poller_max_workers: int = 4
     comfyui_poll_interval_seconds: int = 3
     comfyui_poll_timeout_seconds: int = 600
 
@@ -60,14 +65,24 @@ class Settings(BaseSettings):
             return f"sqlite:///{database_path.as_posix()}"
         return value
 
-    @field_validator("llm_provider", "llm_logic_provider", "llm_prompt_provider", mode="before")
+    @field_validator(
+        "llm_provider",
+        "llm_logic_provider",
+        "llm_prompt_provider",
+        "llm_vision_provider",
+        mode="before",
+    )
     @classmethod
     def normalize_llm_provider(cls, value: str | None) -> str:
         normalized = str(value or "").strip().lower()
         if not normalized:
             return ""
+        if normalized in {"minimax_mcp", "minimax-mcp", "coding-plan", "coding_plan"}:
+            return "minimax_mcp"
         if normalized in {"minimax", "mini-max", "m2", "m2.7"}:
             return "minimax"
+        if normalized in {"none", "off", "disabled"}:
+            return "none"
         return "ollama"
 
     @field_validator(
@@ -87,6 +102,12 @@ class Settings(BaseSettings):
     @classmethod
     def normalize_base_url(cls, value: str | None) -> str:
         return str(value or "https://api.minimaxi.com/v1").strip().rstrip("/")
+
+    @field_validator("minimax_api_host", mode="before")
+    @classmethod
+    def normalize_api_host(cls, value: str | None) -> str:
+        normalized = str(value or "https://api.minimaxi.com").strip().rstrip("/")
+        return normalized.removesuffix("/v1")
 
     @property
     def cors_origins(self) -> list[str]:
@@ -111,6 +132,10 @@ class Settings(BaseSettings):
     @property
     def llm_prompt_provider_name(self) -> str:
         return self.llm_prompt_provider or self.llm_provider_name
+
+    @property
+    def llm_vision_provider_name(self) -> str:
+        return self.llm_vision_provider or "minimax_mcp"
 
     @property
     def comfyui_base_url(self) -> str:
@@ -178,7 +203,7 @@ class Settings(BaseSettings):
         ollama_model: str,
         minimax_model: str,
     ) -> str:
-        if provider == "minimax":
+        if provider in {"minimax", "minimax_mcp"}:
             return f"{role}=MiniMax:{minimax_model or 'not configured'}"
         return f"{role}=Ollama:{ollama_model or 'not configured'}"
 
