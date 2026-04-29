@@ -113,10 +113,12 @@ MINIMAX_LOGIC_MODEL=codex-MiniMax-M2.7
 OLLAMA_PROMPT_MODEL=huihui_ai/qwen3.5-abliterated:9b
 OLLAMA_MAX_CONCURRENCY=1
 COMFYUI_MAX_CONCURRENCY=1
+GPU_IDLE_RELEASE_SECONDS=5
 TELEGRAM_POLLER_MAX_WORKERS=4
 ```
 
 Put `MINIMAX_API_KEY` in ignored `config/vibevision.local.env`. The MiniMax logic path uses the OpenAI-compatible `/chat/completions` API, matching the hosted M2.7 coding-plan setup. Vision understanding uses the MiniMax Coding Plan MCP-compatible `/v1/coding_plan/vlm` endpoint. Prompt enhancement uses local Ollama qwen3.5 9b by default so prompt expansion has a dedicated local context budget.
+When Ollama or ComfyUI has no active VibeVision task for `GPU_IDLE_RELEASE_SECONDS`, the backend unloads local models and asks ComfyUI to free GPU memory.
 
 Optional MiniMax model split:
 

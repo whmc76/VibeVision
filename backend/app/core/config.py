@@ -29,6 +29,7 @@ class Settings(BaseSettings):
     ollama_prompt_model: str = ""
     ollama_vision_max_bytes: int = 8_000_000
     ollama_max_concurrency: int = 1
+    gpu_idle_release_seconds: int = 5
     minimax_base_url: str = "https://api.minimaxi.com/v1"
     minimax_api_host: str = "https://api.minimaxi.com"
     minimax_api_key: str = Field(default="", repr=False)

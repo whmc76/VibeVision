@@ -11,6 +11,7 @@ import httpx
 from app.core.config import Settings
 from app.models import TaskKind, Workflow
 from app.services.concurrency import concurrency_slot
+from app.services.gpu_memory import ollama_gpu_scope, ollama_keep_alive_value
 
 
 class TargetOutput(StrEnum):
@@ -205,6 +206,7 @@ class IntentService:
             "model": logic_model,
             "stream": False,
             "format": "json",
+            "keep_alive": ollama_keep_alive_value(self.settings),
             "prompt": self._router_user_prompt(
                 text=text,
                 workflow_routes=workflow_routes,
@@ -219,15 +221,16 @@ class IntentService:
         if images:
             payload["images"] = images
 
-        async with concurrency_slot("ollama", self.settings.ollama_max_concurrency):
-            async with httpx.AsyncClient(
-                base_url=self.settings.ollama_base_url,
-                timeout=20,
-                limits=self._single_connection_limits(),
-            ) as client:
-                response = await client.post("/api/generate", json=payload)
-                response.raise_for_status()
-                body = response.json()
+        async with ollama_gpu_scope(self.settings):
+            async with concurrency_slot("ollama", self.settings.ollama_max_concurrency):
+                async with httpx.AsyncClient(
+                    base_url=self.settings.ollama_base_url,
+                    timeout=20,
+                    limits=self._single_connection_limits(),
+                ) as client:
+                    response = await client.post("/api/generate", json=payload)
+                    response.raise_for_status()
+                    body = response.json()
 
         data = self._loads_json_object(str(body.get("response") or "{}"))
         return self._intent_result_from_router_data(
@@ -579,6 +582,7 @@ class IntentService:
         payload: dict[str, Any] = {
             "model": prompt_model,
             "stream": False,
+            "keep_alive": ollama_keep_alive_value(self.settings),
             "prompt": (
                 f"{self._prompt_enhancement_system_prompt()}\n\n"
                 f"{self._prompt_enhancement_user_prompt(
@@ -594,15 +598,16 @@ class IntentService:
         if images:
             payload["images"] = images
 
-        async with concurrency_slot("ollama", self.settings.ollama_max_concurrency):
-            async with httpx.AsyncClient(
-                base_url=self.settings.ollama_base_url,
-                timeout=60,
-                limits=self._single_connection_limits(),
-            ) as client:
-                response = await client.post("/api/generate", json=payload)
-                response.raise_for_status()
-                body = response.json()
+        async with ollama_gpu_scope(self.settings):
+            async with concurrency_slot("ollama", self.settings.ollama_max_concurrency):
+                async with httpx.AsyncClient(
+                    base_url=self.settings.ollama_base_url,
+                    timeout=60,
+                    limits=self._single_connection_limits(),
+                ) as client:
+                    response = await client.post("/api/generate", json=payload)
+                    response.raise_for_status()
+                    body = response.json()
         return self._strip_thinking_text(str(body.get("response") or "")).strip()
 
     def _prompt_enhancement_system_prompt(self) -> str:
