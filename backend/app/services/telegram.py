@@ -1,7 +1,10 @@
 import asyncio
 import json
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import PurePosixPath
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 from uuid import uuid4
@@ -55,6 +58,10 @@ class TelegramUpdateError(ValueError):
     pass
 
 
+REQUEST_RETRY_DELAYS = (1.0, 2.0)
+UPLOAD_TIMEOUT_SECONDS = 180
+
+
 class TelegramClient:
     def __init__(self, settings: Settings):
         if not settings.telegram_bot_token:
@@ -78,6 +85,10 @@ class TelegramClient:
 
         text = message.get("text") or message.get("caption")
         source_file_id, source_media_type = self._extract_source_media(message)
+        if not source_file_id:
+            reply_to_message = message.get("reply_to_message")
+            if isinstance(reply_to_message, dict):
+                source_file_id, source_media_type = self._extract_source_media(reply_to_message)
 
         first_name = from_user.get("first_name") or ""
         last_name = from_user.get("last_name") or ""
@@ -240,13 +251,15 @@ class TelegramClient:
             content_type=content_type,
         )
 
-    async def _request(self, method: str, payload: dict, timeout: int = 30) -> dict:
+    async def _request(self, method: str, payload: dict, timeout: int = 30) -> Any:
         return await asyncio.to_thread(self._request_sync, method, payload, timeout)
 
-    def _request_sync(self, method: str, payload: dict, timeout: int) -> dict:
-        request = self._build_json_request(method, payload)
-        body = self._execute_request(request, timeout=timeout)
-        return body.get("result") or {}
+    def _request_sync(self, method: str, payload: dict, timeout: int) -> Any:
+        body = self._execute_request_with_retry(
+            lambda: self._build_json_request(method, payload),
+            timeout=timeout,
+        )
+        return body.get("result") if "result" in body else {}
 
     async def _upload_request(
         self,
@@ -285,13 +298,15 @@ class TelegramClient:
             media_bytes=media_bytes,
             content_type=content_type,
         )
-        request = Request(
-            url=f"{self.api_base_url}/{method}",
-            data=body,
-            headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
-            method="POST",
+        response = self._execute_request_with_retry(
+            lambda: Request(
+                url=f"{self.api_base_url}/{method}",
+                data=body,
+                headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+                method="POST",
+            ),
+            timeout=UPLOAD_TIMEOUT_SECONDS,
         )
-        response = self._execute_request(request, timeout=60)
         return response.get("result") or {}
 
     def _build_json_request(self, method: str, payload: dict) -> Request:
@@ -303,6 +318,25 @@ class TelegramClient:
                 method="POST",
             )
         return Request(url=f"{self.api_base_url}/{method}", method="GET")
+
+    def _execute_request_with_retry(
+        self,
+        build_request: Callable[[], Request],
+        timeout: int = 30,
+    ) -> dict:
+        last_error: TelegramUpdateError | None = None
+        for attempt in range(len(REQUEST_RETRY_DELAYS) + 1):
+            try:
+                return self._execute_request(build_request(), timeout=timeout)
+            except TelegramUpdateError as exc:
+                last_error = exc
+                if attempt >= len(REQUEST_RETRY_DELAYS) or not self._is_retryable_error(exc):
+                    raise
+                time.sleep(REQUEST_RETRY_DELAYS[attempt])
+
+        if last_error:
+            raise last_error
+        raise TelegramUpdateError("Telegram API request failed.")
 
     def _execute_request(self, request: Request, timeout: int = 30) -> dict:
         try:
@@ -319,6 +353,25 @@ class TelegramClient:
         if not body.get("ok"):
             raise TelegramUpdateError(str(body))
         return body
+
+    def _is_retryable_error(self, exc: TelegramUpdateError) -> bool:
+        cause = exc.__cause__
+        if isinstance(cause, HTTPError):
+            return 500 <= cause.code < 600
+        if isinstance(cause, (TimeoutError, URLError)):
+            return True
+
+        message = str(exc).lower()
+        return any(
+            token in message
+            for token in (
+                "timed out",
+                "timeout",
+                "temporarily unavailable",
+                "connection reset",
+                "connection aborted",
+            )
+        )
 
     def _encode_multipart_form_data(
         self,
