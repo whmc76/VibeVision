@@ -1,6 +1,8 @@
 import asyncio
 import copy
+import logging
 import random
+import time
 from typing import Any
 from urllib.parse import urlencode
 from uuid import uuid4
@@ -10,7 +12,9 @@ import httpx
 from app.core.config import Settings
 from app.models import Workflow
 from app.services.concurrency import concurrency_slot
-from app.services.gpu_memory import comfyui_gpu_scope, schedule_comfyui_gpu_release
+from app.services.gpu_memory import comfyui_gpu_scope
+
+logger = logging.getLogger(__name__)
 
 _COMFYUI_RETRY_ATTEMPTS = 3
 _COMFYUI_RETRYABLE_STATUS_CODES = {502, 503, 504}
@@ -28,6 +32,26 @@ class ComfyUIClient:
     def __init__(self, settings: Settings):
         self.settings = settings
 
+    async def wait_until_ready(self, timeout_seconds: int) -> None:
+        deadline = asyncio.get_running_loop().time() + timeout_seconds
+        last_error: Exception | None = None
+
+        while asyncio.get_running_loop().time() < deadline:
+            try:
+                async with self._client(timeout=5) as client:
+                    response = await client.get("/system_stats")
+                    response.raise_for_status()
+                    return
+            except Exception as exc:
+                last_error = exc
+                await asyncio.sleep(2)
+
+        if last_error:
+            raise TimeoutError(
+                f"ComfyUI did not become ready within {timeout_seconds}s."
+            ) from last_error
+        raise TimeoutError(f"ComfyUI did not become ready within {timeout_seconds}s.")
+
     async def submit_prompt(
         self,
         workflow: Workflow,
@@ -35,19 +59,32 @@ class ComfyUIClient:
         source_media_url: str | None,
         parameters: dict[str, Any] | None = None,
     ) -> str:
-        try:
+        started_at = time.perf_counter()
+        async with comfyui_gpu_scope(self.settings):
             async with concurrency_slot("comfyui", self.settings.comfyui_max_concurrency):
                 async with self._client(timeout=30) as client:
                     source_image_name = None
                     if source_media_url and self._template_requires_source_image(workflow.template or {}):
+                        upload_started_at = time.perf_counter()
                         source_image_name = await self._upload_source_image(client, source_media_url)
+                        logger.info(
+                            "comfyui_source_image_upload_complete workflow=%s elapsed=%.2fs total=%.2fs",
+                            workflow.comfy_workflow_key,
+                            time.perf_counter() - upload_started_at,
+                            time.perf_counter() - started_at,
+                        )
 
                     payload = self._build_payload(workflow, prompt, source_image_name, parameters or {})
+                    submit_started_at = time.perf_counter()
                     response = await self._request(client, "POST", "/prompt", json=payload)
                     response.raise_for_status()
                     data = response.json()
-        finally:
-            schedule_comfyui_gpu_release(self.settings)
+                    logger.info(
+                        "comfyui_prompt_submit_complete workflow=%s elapsed=%.2fs total=%.2fs",
+                        workflow.comfy_workflow_key,
+                        time.perf_counter() - submit_started_at,
+                        time.perf_counter() - started_at,
+                    )
         return str(data.get("prompt_id") or data.get("id") or uuid4())
 
     def _build_payload(

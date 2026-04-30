@@ -8,6 +8,7 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+$ProgressPreference = "SilentlyContinue"
 $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $BackendDir = Join-Path $Root "backend"
 $FrontendDir = Join-Path $Root "frontend"
@@ -302,7 +303,6 @@ function Sync-Frontend {
 function Test-ComfyUIConfig {
   Write-Step "Checking ComfyUI configuration"
   $ComfyRoot = Get-EnvText -Name "COMFYUI_ROOT" -DefaultValue ""
-  $StartScript = Get-EnvText -Name "COMFYUI_START_SCRIPT" -DefaultValue "run_nvidia_gpu.bat"
 
   if (-not $ComfyRoot) {
     Write-WarnLine "COMFYUI_ROOT is not configured."
@@ -312,9 +312,14 @@ function Test-ComfyUIConfig {
     Write-WarnLine "COMFYUI_ROOT does not exist: $ComfyRoot"
     return
   }
-  $ScriptPath = Join-Path $ComfyRoot $StartScript
-  if (-not (Test-Path -LiteralPath $ScriptPath)) {
-    Write-WarnLine "ComfyUI start script not found: $ScriptPath"
+  $PythonPath = Join-Path $ComfyRoot "python_embeded\python.exe"
+  $MainPath = Join-Path $ComfyRoot "ComfyUI\main.py"
+  if (-not (Test-Path -LiteralPath $PythonPath)) {
+    Write-WarnLine "ComfyUI embedded Python not found: $PythonPath"
+    return
+  }
+  if (-not (Test-Path -LiteralPath $MainPath)) {
+    Write-WarnLine "ComfyUI main.py not found: $MainPath"
     return
   }
   Write-Ok "ComfyUI root is ready: $ComfyRoot"
@@ -347,7 +352,21 @@ function Test-OllamaConfig {
   }
 
   try {
-    $Models = & ollama list 2>$null
+    Write-Host "Inspecting Ollama model list (timeout 8s)."
+    $ModelListJob = Start-Job -ScriptBlock {
+      param([string]$OllamaPath)
+      & $OllamaPath list 2>$null
+    } -ArgumentList $Ollama.Source
+
+    if (-not (Wait-Job -Job $ModelListJob -Timeout 8)) {
+      Stop-Job -Job $ModelListJob -ErrorAction SilentlyContinue
+      Remove-Job -Job $ModelListJob -Force -ErrorAction SilentlyContinue
+      Write-WarnLine "Ollama model inspection timed out. Startup will continue; check Ollama manually if prompt routing fails."
+      return
+    }
+
+    $Models = Receive-Job -Job $ModelListJob -ErrorAction Stop
+    Remove-Job -Job $ModelListJob -Force -ErrorAction SilentlyContinue
     foreach ($Entry in $UniqueModels.GetEnumerator()) {
       $Model = [string]$Entry.Key
       $Roles = @($Entry.Value) -join "+"
@@ -385,9 +404,61 @@ function Test-LlmConfig {
   }
 }
 
+function Show-StartupPlan {
+  Write-Step "Startup plan"
+  $ApiPort = Get-EnvInt -Name "API_PORT" -DefaultValue 18751
+  $FrontendPort = Get-EnvInt -Name "ADMIN_FRONTEND_PORT" -DefaultValue 18742
+  $ComfyPort = Get-EnvInt -Name "COMFYUI_PORT" -DefaultValue 8401
+  $OllamaPort = Get-EnvInt -Name "OLLAMA_PORT" -DefaultValue 11434
+
+  $InstallStep = if ($SkipInstall) {
+    "Skip dependency installation because -SkipInstall was set."
+  } else {
+    "Check backend Python dependencies and frontend Node dependencies."
+  }
+
+  $TelegramStep = if ($env:TELEGRAM_BOT_TOKEN) {
+    "Start Telegram local poller if it is not already running."
+  } else {
+    "Skip Telegram local poller because TELEGRAM_BOT_TOKEN is not configured."
+  }
+
+  $LlmSteps = @()
+  if (Test-LlmUsesMiniMax) {
+    $LlmSteps += "Check MiniMax configuration."
+  }
+  if (Test-LlmUsesOllama) {
+    $LlmSteps += "Check Ollama installation and model list with an 8s timeout."
+  }
+  if ($LlmSteps.Count -eq 0) {
+    $LlmSteps += "No local LLM provider checks are required by the current configuration."
+  }
+
+  Write-Host "This bootstrap will run these steps before it opens the control GUI:"
+  Write-Host "  1. $InstallStep"
+  Write-Host "  2. Check ComfyUI configuration, start ComfyUI if needed, and wait for /system_stats on port $ComfyPort."
+  Write-Host "  3. $($LlmSteps -join " ") Start Ollama if needed and wait for /api/tags on port $OllamaPort."
+  Write-Host "  4. Start and verify API (port $ApiPort) and admin frontend (port $FrontendPort)."
+  Write-Host "  5. Start task queue worker only after ComfyUI/API are healthy."
+  Write-Host "  6. $TelegramStep Telegram starts last so messages cannot enter before dependencies are ready."
+  if (Test-LlmUsesOllama) {
+    Write-Host "  7. Report final status for ComfyUI, Ollama, API, and admin frontend, then show URLs."
+  } else {
+    Write-Host "  7. Report final status for ComfyUI, API, and admin frontend, then show URLs."
+  }
+  if ($NoGui) {
+    Write-Host "  GUI: skipped because -NoGui was set."
+  } else {
+    Write-Host "  GUI: open VibeVision Control after service checks."
+  }
+}
+
 function Start-Services {
   Write-Step "Starting missing VibeVision services"
-  & (Join-Path $Root "scripts\start-all.ps1") -ConfigPath $ConfigPath -LocalConfigPath $LocalConfigPath
+  & (Join-Path $Root "scripts\start-all.ps1") `
+    -ConfigPath $ConfigPath `
+    -LocalConfigPath $LocalConfigPath `
+    -ServiceWaitSeconds $WaitSeconds
 }
 
 function Show-ServiceStatus {
@@ -444,6 +515,8 @@ Ensure-LocalConfig
 Import-VibeVisionConfig -Path $ConfigPath
 Import-VibeVisionConfig -Path $LocalConfigPath
 New-Item -ItemType Directory -Path (Join-Path $Root "data") -Force | Out-Null
+
+Show-StartupPlan
 
 if (-not $SkipInstall) {
   Sync-Backend

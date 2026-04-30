@@ -33,17 +33,19 @@ class Settings(BaseSettings):
     minimax_base_url: str = "https://api.minimaxi.com/v1"
     minimax_api_host: str = "https://api.minimaxi.com"
     minimax_api_key: str = Field(default="", repr=False)
-    minimax_model: str = "codex-MiniMax-M2.7"
+    minimax_model: str = "MiniMax-M2.7"
     minimax_logic_model: str = ""
     minimax_prompt_model: str = ""
-    minimax_timeout_seconds: int = 60
-    minimax_vision_timeout_seconds: int = 60
+    minimax_timeout_seconds: int = 20
+    minimax_vision_timeout_seconds: int = 12
     minimax_vision_max_bytes: int = 8_000_000
+    minimax_chat_completions_path: str = "/chat/completions"
+    minimax_mcp_vlm_path: str = "/v1/coding_plan/vlm"
     comfyui_host: str = "127.0.0.1"
     comfyui_port: int = 8401
     comfyui_root: str = ""
-    comfyui_start_script: str = "run_nvidia_gpu.bat"
     comfyui_max_concurrency: int = 1
+    comfyui_startup_wait_seconds: int = 180
     telegram_bot_token: str = ""
     telegram_webhook_secret: str = Field(default="", repr=False)
     telegram_poller_max_workers: int = 4
@@ -117,6 +119,14 @@ class Settings(BaseSettings):
     def normalize_api_host(cls, value: str | None) -> str:
         normalized = str(value or "https://api.minimaxi.com").strip().rstrip("/")
         return normalized.removesuffix("/v1")
+
+    @field_validator("minimax_chat_completions_path", "minimax_mcp_vlm_path", mode="before")
+    @classmethod
+    def normalize_api_path(cls, value: str | None) -> str:
+        normalized = str(value or "").strip()
+        if not normalized:
+            return "/"
+        return f"/{normalized.lstrip('/')}"
 
     @property
     def cors_origins(self) -> list[str]:
