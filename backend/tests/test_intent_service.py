@@ -394,6 +394,24 @@ def test_enhance_task_prompt_passes_source_image_context(monkeypatch) -> None:
     assert result == "cinematic lighting edit grounded in the source image"
 
 
+def test_prompt_enhancement_context_prioritizes_user_request() -> None:
+    service = build_service()
+    route = service._build_workflow_routes(build_workflows())[0]
+
+    system_prompt = service._prompt_enhancement_system_prompt()
+    user_prompt = service._prompt_enhancement_user_prompt(
+        workflow=route,
+        user_text="生图 被攻击的权力的游戏龙妈",
+        router_prompt="a fantasy character portrait in silver armor",
+        media_attached=False,
+        source_media_type=None,
+    )
+
+    assert "Treat user_request as the source of truth" in system_prompt
+    assert "Do not replace explicit user intent with a broader scene" in system_prompt
+    assert "core_user_request_to_preserve=生图 被攻击的权力的游戏龙妈" in user_prompt
+
+
 def test_router_prompt_includes_vision_context() -> None:
     service = build_service()
     route = service._build_workflow_routes(build_workflows())[0]
