@@ -12,7 +12,7 @@ from app.services.credits import refund_task_credits
 from app.services.error_details import format_exception_details
 from app.services.gpu_memory import comfyui_gpu_scope
 from app.services.task_runner import complete_comfyui_task
-from app.services.telegram import TelegramClient
+from app.services.telegram import TelegramClient, build_result_caption
 
 logger = logging.getLogger(__name__)
 STALE_RUNNING_TASK_SECONDS = 300
@@ -54,6 +54,12 @@ async def recover_task(task_id: int, settings: Settings) -> None:
         kind = task.kind
         chat_id = task.telegram_chat_id
         reply_to_message_id = task.telegram_message_id
+        include_prompt = bool(task.user and task.user.is_admin)
+        result_caption = build_result_caption(
+            task.interpreted_prompt or task.original_text,
+            task_id=task.id,
+            include_prompt=include_prompt,
+        )
 
     result_urls = await comfyui.get_result_urls(prompt_id)
     if result_urls:
@@ -64,7 +70,13 @@ async def recover_task(task_id: int, settings: Settings) -> None:
             db.add(task)
             db.commit()
         if chat_id:
-            await telegram.send_result_media(chat_id, result_urls, kind, reply_to_message_id)
+            await telegram.send_result_media(
+                chat_id,
+                result_urls,
+                kind,
+                reply_to_message_id,
+                caption=result_caption,
+            )
         return
 
     await _retry_task(task_id, settings)

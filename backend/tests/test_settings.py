@@ -30,7 +30,7 @@ def test_settings_resolve_minimax_models_and_provider_alias() -> None:
         llm_provider="m2.7",
         llm_logic_provider="m2.7",
         llm_prompt_provider="ollama",
-        minimax_model="codex-MiniMax-M2.7",
+        minimax_model="MiniMax-M2.7",
         minimax_logic_model="",
         minimax_prompt_model="prompt-model",
         ollama_prompt_model="qwen-prompt-model",
@@ -39,10 +39,10 @@ def test_settings_resolve_minimax_models_and_provider_alias() -> None:
     assert settings.llm_provider_name == "minimax"
     assert settings.llm_logic_provider_name == "minimax"
     assert settings.llm_prompt_provider_name == "ollama"
-    assert settings.minimax_logic_model_name == "codex-MiniMax-M2.7"
+    assert settings.minimax_logic_model_name == "MiniMax-M2.7"
     assert settings.minimax_prompt_model_name == "prompt-model"
     assert settings.llm_model_summary == (
-        "logic=MiniMax:codex-MiniMax-M2.7, prompt=Ollama:qwen-prompt-model"
+        "logic=MiniMax:MiniMax-M2.7, prompt=Ollama:qwen-prompt-model"
     )
 
 
@@ -57,9 +57,24 @@ def test_settings_default_concurrency_limits_are_serial_for_ollama_and_comfyui()
     assert settings.telegram_update_queue_workers == 1
     assert settings.telegram_update_queue_maxlen == 100_000
     assert settings.telegram_duplicate_message_window_seconds == 45
+    assert settings.telegram_regenerate_cooldown_seconds == 45
 
 
 def test_settings_supports_minimax_mcp_vision_provider() -> None:
     settings = Settings(llm_vision_provider="coding-plan")
 
     assert settings.llm_vision_provider_name == "minimax_mcp"
+
+
+def test_settings_normalizes_minimax_hosts_and_paths() -> None:
+    settings = Settings(
+        minimax_base_url="https://api.minimaxi.com/v1/",
+        minimax_api_host="https://api.minimaxi.com/v1/",
+        minimax_chat_completions_path="chat/completions",
+        minimax_mcp_vlm_path="v1/coding_plan/vlm",
+    )
+
+    assert settings.minimax_base_url == "https://api.minimaxi.com/v1"
+    assert settings.minimax_api_host == "https://api.minimaxi.com"
+    assert settings.minimax_chat_completions_path == "/chat/completions"
+    assert settings.minimax_mcp_vlm_path == "/v1/coding_plan/vlm"

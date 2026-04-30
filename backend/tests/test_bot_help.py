@@ -17,9 +17,9 @@ from app.services.telegram import build_bot_commands, build_remove_keyboard_mark
 def build_workflows() -> list[Workflow]:
     return [
         Workflow(
-            name="SDXL Prompt To Image",
+            name="Z-Image Turbo Text To Image",
             kind=TaskKind.image_generate,
-            comfy_workflow_key="sdxl-text-to-image",
+            comfy_workflow_key="z-image-turbo-text-to-image",
             description="Generate images from text prompts.",
             credit_cost=1,
             is_active=True,
@@ -101,13 +101,18 @@ def test_build_help_message_reflects_active_workflows_and_credit_costs() -> None
     assert "文生图（1 积分/次）" in message
     assert "图片编辑（1 积分/次）" in message
     assert "提示词扩写" not in message
+    assert "图生视频" not in message
     assert "/start 查看欢迎与能力说明" in message
     assert "/photo 或 /p <描述> 直接提交图片任务" in message
-    assert "/video 或 /v <描述> 直接提交视频任务" in message
+    assert "/video 或 /v <描述> 直接提交视频任务" not in message
     assert "/check 查询套餐和剩余点数" in message
+    assert "/status 查看系统在线状态" in message
     assert "生图/生成图片/出图 <描述> 直接提交图片任务" in message
-    assert "生视频/生成视频/出视频 <描述> 直接提交视频任务" in message
-    assert "图生视频 <描述> 配合图片提交视频任务" in message
+    assert "改图/修图/图片编辑/编辑图 <描述> 配合图片提交编辑任务" in message
+    assert "生视频/生成视频/出视频 <描述> 直接提交视频任务" not in message
+    assert "图生视频 <描述> 配合图片提交视频任务" not in message
+    assert "English: generate image/photo/picture, edit image/photo/picture" in message
+    assert "English: generate video, text to video, image/photo/picture to video" not in message
 
 
 def test_resolve_quick_action_supports_keyboard_entries_and_check_command() -> None:
@@ -120,6 +125,8 @@ def test_resolve_quick_action_supports_keyboard_entries_and_check_command() -> N
     assert resolve_quick_action("查询") == BotQuickAction.query
     assert resolve_quick_action("/check") == BotQuickAction.query
     assert resolve_quick_action("/query") == BotQuickAction.query
+    assert resolve_quick_action("/status") == BotQuickAction.status
+    assert resolve_quick_action("系统状态") == BotQuickAction.status
     assert resolve_quick_action("图片 改成油画") is None
 
 
@@ -133,17 +140,14 @@ def test_build_image_workflow_message_lists_active_image_capabilities() -> None:
     assert "推荐写法：/photo 生成一张赛博朋克风的人像海报" in message
     assert "缩写也可以：/p 生成一张赛博朋克风的人像海报" in message
     assert "关键词也可以：生图 生成一张赛博朋克风的人像海报" in message
+    assert "图片编辑可以写：改图 把背景换成海边" in message
+    assert "English: generate image cyberpunk portrait, edit image change background" in message
 
 
 def test_build_video_workflow_message_includes_video_cost() -> None:
     message = build_video_workflow_message(build_workflows())
 
-    assert "视频工作流：" in message
-    assert "图生视频（10 积分/次）" in message
-    assert "推荐写法：/video 生成一个霓虹街头雨夜慢镜头短视频" in message
-    assert "缩写也可以：/v 生成一个霓虹街头雨夜慢镜头短视频" in message
-    assert "关键词也可以：生视频 生成一个霓虹街头雨夜慢镜头短视频" in message
-    assert "图生视频可以写：图生视频 镜头缓慢推进" in message
+    assert message == "当前没有可用的视频工作流。"
 
 
 def test_build_account_message_formats_tier_and_balance() -> None:
@@ -171,5 +175,6 @@ def test_build_bot_commands_has_expected_entries() -> None:
         {"command": "photo", "description": "照片工作流"},
         {"command": "video", "description": "视频工作流"},
         {"command": "check", "description": "套餐和剩余点数"},
+        {"command": "status", "description": "系统在线状态"},
         {"command": "start", "description": "欢迎与使用说明"},
     ]

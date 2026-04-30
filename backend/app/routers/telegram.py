@@ -22,7 +22,7 @@ async def submit_bot_message(
 ) -> BotMessageResponse:
     orchestrator = GenerationOrchestrator(settings)
     try:
-        task = await orchestrator.handle_bot_message(db, payload)
+        task = await orchestrator.enqueue_bot_message(db, payload)
     except WorkflowUnavailableError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except TargetOutputRequiredError as exc:
@@ -37,10 +37,10 @@ async def submit_bot_message(
         credit_cost=task.credit_cost,
         remaining_credits=task.user.credit_balance,
         message=(
-            "Task accepted."
+            "Task queued."
             if not task.error_message
             else append_error_detail(
-                "Task created but dispatch failed.",
+                "Task created but queueing failed.",
                 task.error_message,
                 task_id=task.id,
             )

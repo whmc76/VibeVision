@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass, replace
 from typing import Any
 
+import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -36,7 +37,14 @@ from app.services.orchestrator import (
     GenerationPreflight,
     WorkflowUnavailableError,
 )
-from app.services.telegram import TelegramClient, TelegramUpdateError
+from app.services.telegram import (
+    REGENERATE_CALLBACK_PREFIX,
+    TelegramCallbackQuery,
+    TelegramClient,
+    TelegramUpdateError,
+    build_regenerate_result_markup,
+    build_result_caption,
+)
 from app.services.users import get_or_create_telegram_user
 
 logger = logging.getLogger(__name__)
@@ -74,10 +82,13 @@ _recent_source_media: dict[tuple[str, str], _PendingSourceMedia] = {}
 _pending_instructions: dict[tuple[str, str], _PendingInstruction] = {}
 _duplicate_message_lock = asyncio.Lock()
 _recent_inbound_messages: dict[tuple[str, str], _RecentInboundMessage] = {}
+_recent_generation_requests: dict[tuple[str, str], _RecentInboundMessage] = {}
+_recent_regeneration_requests: dict[tuple[str, str, str], _RecentInboundMessage] = {}
 _dedupe_redis_clients: dict[str, Any] = {}
 
 
 async def process_telegram_update(update: dict, settings: Settings) -> None:
+    request_started_at = time.perf_counter()
     telegram = TelegramClient(settings)
     welcome_chat_id = extract_welcome_chat_id(update)
     if welcome_chat_id:
@@ -85,6 +96,14 @@ async def process_telegram_update(update: dict, settings: Settings) -> None:
             welcome_chat_id,
             _render_help_message(include_welcome=True),
         )
+        return
+
+    try:
+        callback_query = telegram.parse_callback_query(update)
+    except TelegramUpdateError:
+        return
+    if callback_query:
+        await _process_regenerate_callback(callback_query, settings, telegram)
         return
 
     try:
@@ -155,6 +174,13 @@ async def process_telegram_update(update: dict, settings: Settings) -> None:
                 inbound.message_id,
             )
             return
+        if quick_action == BotQuickAction.status:
+            await telegram.send_message(
+                inbound.chat_id,
+                await _build_status_message(settings),
+                inbound.message_id,
+            )
+            return
 
     if not inbound.text and not inbound.source_file_id:
         await telegram.send_message(
@@ -191,6 +217,28 @@ async def process_telegram_update(update: dict, settings: Settings) -> None:
             wait_seconds=FOLLOWUP_SOURCE_MEDIA_WAIT_SECONDS,
         )
 
+    if _image_request_needs_source_media(explicit_target, effective_text) and not inbound.source_file_id:
+        await telegram.send_message(
+            inbound.chat_id,
+            "这看起来是图片编辑请求。请发送或转发要编辑的图片，并把要求作为图片配文，或回复那张图片发送要求。",
+            inbound.message_id,
+        )
+        return
+
+    if await _is_duplicate_generation_request(inbound, effective_text, explicit_target, settings):
+        logger.info(
+            "telegram_duplicate_generation_request_skipped chat_id=%s telegram_id=%s message_id=%s",
+            inbound.chat_id,
+            inbound.telegram_id,
+            inbound.message_id,
+        )
+        await telegram.send_message(
+            inbound.chat_id,
+            "这条生成请求刚刚处理过，已跳过重复提交。",
+            inbound.message_id,
+        )
+        return
+
     preflight_payload = BotMessageRequest(
         telegram_id=inbound.telegram_id,
         username=inbound.username,
@@ -205,6 +253,7 @@ async def process_telegram_update(update: dict, settings: Settings) -> None:
     orchestrator = GenerationOrchestrator(settings)
 
     with SessionLocal() as db:
+        stage_started_at = time.perf_counter()
         try:
             preflight = orchestrator.preflight_bot_message(db, preflight_payload)
         except WorkflowUnavailableError as exc:
@@ -239,6 +288,15 @@ async def process_telegram_update(update: dict, settings: Settings) -> None:
                 inbound.message_id,
             )
             return
+        logger.info(
+            "telegram_preflight_complete chat_id=%s message_id=%s target=%s source_media=%s elapsed=%.2fs total=%.2fs",
+            inbound.chat_id,
+            inbound.message_id,
+            preflight.target_output.value,
+            preflight.source_media_type or "none",
+            time.perf_counter() - stage_started_at,
+            time.perf_counter() - request_started_at,
+        )
 
     await telegram.send_message(
         inbound.chat_id,
@@ -248,6 +306,7 @@ async def process_telegram_update(update: dict, settings: Settings) -> None:
 
     source_media_url = None
     if inbound.source_file_id:
+        stage_started_at = time.perf_counter()
         try:
             source_media_url = await telegram.get_file_url(inbound.source_file_id)
         except Exception as exc:
@@ -261,6 +320,13 @@ async def process_telegram_update(update: dict, settings: Settings) -> None:
                 inbound.message_id,
             )
             return
+        logger.info(
+            "telegram_source_media_url_complete chat_id=%s message_id=%s elapsed=%.2fs total=%.2fs",
+            inbound.chat_id,
+            inbound.message_id,
+            time.perf_counter() - stage_started_at,
+            time.perf_counter() - request_started_at,
+        )
 
     payload = BotMessageRequest(
         telegram_id=inbound.telegram_id,
@@ -274,84 +340,84 @@ async def process_telegram_update(update: dict, settings: Settings) -> None:
         telegram_message_id=inbound.message_id,
     )
 
-    async with comfyui_gpu_scope(settings):
-        async with concurrency_slot("comfyui", settings.comfyui_max_concurrency):
-            with SessionLocal() as db:
-                try:
-                    task = await orchestrator.handle_bot_message(db, payload)
-                except WorkflowUnavailableError as exc:
-                    await telegram.send_message(
-                        inbound.chat_id,
-                        append_error_detail("没有可用工作流。", str(exc), label="详细信息"),
-                        inbound.message_id,
-                    )
-                    return
-                except TargetOutputRequiredError as exc:
-                    await telegram.send_message(
-                        inbound.chat_id,
-                        str(exc),
-                        inbound.message_id,
-                    )
-                    return
-                except InsufficientCreditsError as exc:
-                    await telegram.send_message(
-                        inbound.chat_id,
-                        str(exc),
-                        inbound.message_id,
-                    )
-                    return
-                except ValueError as exc:
-                    await telegram.send_message(
-                        inbound.chat_id,
-                        append_error_detail("请求处理失败。", str(exc), label="详细信息"),
-                        inbound.message_id,
-                    )
-                    return
-                except Exception as exc:
-                    await telegram.send_message(
-                        inbound.chat_id,
-                        append_error_detail(
-                            "任务创建失败，请检查后端配置和工作流参数。",
-                            format_exception_details(exc),
-                            label="详细信息",
-                        ),
-                        inbound.message_id,
-                    )
-                    return
-
-                status = task.status
-                external_job_id = task.external_job_id
-                kind = task.kind
-                credit_cost = task.credit_cost
-                error_message = task.error_message
-
-            if status == TaskStatus.failed or not external_job_id:
-                await telegram.send_message(
-                    inbound.chat_id,
-                    append_error_detail(
-                        "任务创建失败，积分已退回。请检查 ComfyUI 工作流配置。",
-                        error_message,
-                        label="详细信息",
-                        task_id=task.id,
-                    ),
-                    inbound.message_id,
-                )
-                return
-
+    with SessionLocal() as db:
+        stage_started_at = time.perf_counter()
+        try:
+            task = await orchestrator.enqueue_bot_message(db, payload)
+        except WorkflowUnavailableError as exc:
             await telegram.send_message(
                 inbound.chat_id,
-                f"{_task_kind_label(kind)}已提交，实际消耗 {credit_cost} 积分。完成后会自动回传结果。",
+                append_error_detail("没有可用工作流。", str(exc), label="详细信息"),
                 inbound.message_id,
             )
-
-            await complete_comfyui_task(
-                task_id=task.id,
-                prompt_id=external_job_id,
-                chat_id=inbound.chat_id,
-                reply_to_message_id=inbound.message_id,
-                kind=kind,
-                settings=settings,
+            return
+        except TargetOutputRequiredError as exc:
+            await telegram.send_message(
+                inbound.chat_id,
+                str(exc),
+                inbound.message_id,
             )
+            return
+        except InsufficientCreditsError as exc:
+            await telegram.send_message(
+                inbound.chat_id,
+                str(exc),
+                inbound.message_id,
+            )
+            return
+        except ValueError as exc:
+            await telegram.send_message(
+                inbound.chat_id,
+                append_error_detail("请求处理失败。", str(exc), label="详细信息"),
+                inbound.message_id,
+            )
+            return
+        except Exception as exc:
+            await telegram.send_message(
+                inbound.chat_id,
+                append_error_detail(
+                    "任务创建失败，请检查后端配置和工作流参数。",
+                    format_exception_details(exc),
+                    label="详细信息",
+                ),
+                inbound.message_id,
+            )
+            return
+
+        logger.info(
+            "telegram_task_create_complete chat_id=%s message_id=%s task_id=%s status=%s elapsed=%.2fs total=%.2fs",
+            inbound.chat_id,
+            inbound.message_id,
+            task.id,
+            task.status.value,
+            time.perf_counter() - stage_started_at,
+            time.perf_counter() - request_started_at,
+        )
+
+        status = task.status
+        created_task_id = task.id
+        kind = task.kind
+        credit_cost = task.credit_cost
+        error_message = task.error_message
+
+    if status == TaskStatus.failed:
+        await telegram.send_message(
+            inbound.chat_id,
+            append_error_detail(
+                "任务创建失败，积分已退回。请检查工作流配置。",
+                error_message,
+                label="详细信息",
+                task_id=created_task_id,
+            ),
+            inbound.message_id,
+        )
+        return
+
+    await telegram.send_message(
+        inbound.chat_id,
+        f"{_task_kind_label(kind)}已加入队列，任务 #{created_task_id}，实际消耗 {credit_cost} 积分。完成后会自动回传结果。",
+        inbound.message_id,
+    )
 
 
 async def complete_comfyui_task(
@@ -451,11 +517,24 @@ async def _complete_task_success(
         task = _get_task(db, task_id)
         task.status = TaskStatus.completed
         task.result_urls = result_urls
+        include_prompt = bool(task.user and task.user.is_admin)
+        result_caption = build_result_caption(
+            task.interpreted_prompt or task.original_text,
+            task_id=task_id,
+            include_prompt=include_prompt,
+        )
         db.add(task)
         db.commit()
 
     try:
-        await telegram.send_result_media(chat_id, result_urls, kind, reply_to_message_id)
+        await telegram.send_result_media(
+            chat_id,
+            result_urls,
+            kind,
+            reply_to_message_id,
+            caption=result_caption,
+            reply_markup=build_regenerate_result_markup(task_id),
+        )
     except Exception as exc:
         await telegram.send_message(
             chat_id,
@@ -467,6 +546,78 @@ async def _complete_task_success(
             ),
             reply_to_message_id,
         )
+
+
+async def _process_regenerate_callback(
+    callback_query: TelegramCallbackQuery,
+    settings: Settings,
+    telegram: TelegramClient,
+) -> None:
+    if not callback_query.data.startswith(REGENERATE_CALLBACK_PREFIX):
+        await telegram.answer_callback_query(callback_query.callback_query_id)
+        return
+
+    raw_task_id = callback_query.data.removeprefix(REGENERATE_CALLBACK_PREFIX)
+    try:
+        source_task_id = int(raw_task_id)
+    except ValueError:
+        await telegram.answer_callback_query(callback_query.callback_query_id, "无效的任务。")
+        return
+
+    if await _is_duplicate_regeneration_request(callback_query, source_task_id, settings):
+        logger.info(
+            "telegram_duplicate_regeneration_skipped chat_id=%s telegram_id=%s source_task_id=%s",
+            callback_query.chat_id,
+            callback_query.telegram_id,
+            source_task_id,
+        )
+        await telegram.answer_callback_query(
+            callback_query.callback_query_id,
+            "这条任务刚刚已重新生成，请稍后再试。",
+        )
+        return
+
+    orchestrator = GenerationOrchestrator(settings)
+    with SessionLocal() as db:
+        source_task = db.get(GenerationTask, source_task_id)
+        if not source_task:
+            await telegram.answer_callback_query(callback_query.callback_query_id, "任务不存在。")
+            return
+        if not source_task.user or source_task.user.telegram_id != callback_query.telegram_id:
+            await telegram.answer_callback_query(callback_query.callback_query_id, "只能重新生成自己的任务。")
+            return
+
+        try:
+            task = orchestrator.enqueue_regeneration(db, source_task_id)
+        except InsufficientCreditsError as exc:
+            await telegram.answer_callback_query(callback_query.callback_query_id, str(exc))
+            return
+        except WorkflowUnavailableError as exc:
+            await telegram.answer_callback_query(callback_query.callback_query_id, str(exc))
+            return
+        except ValueError as exc:
+            await telegram.answer_callback_query(callback_query.callback_query_id, str(exc))
+            return
+        except Exception as exc:
+            logger.exception("telegram_regenerate_callback_failed source_task_id=%s", source_task_id)
+            await telegram.answer_callback_query(callback_query.callback_query_id, "重新生成失败。")
+            await telegram.send_message(
+                callback_query.chat_id,
+                append_error_detail("重新生成失败。", format_exception_details(exc), label="详细信息"),
+                callback_query.message_id,
+            )
+            return
+
+        task_id = task.id
+        kind = task.kind
+        credit_cost = task.credit_cost
+
+    await telegram.answer_callback_query(callback_query.callback_query_id, "已重新加入队列。")
+    await telegram.send_message(
+        callback_query.chat_id,
+        f"{_task_kind_label(kind)}已重新加入队列，任务 #{task_id}，实际消耗 {credit_cost} 积分。完成后会自动回传结果。",
+        callback_query.message_id,
+    )
 
 
 def _get_task(db: Session, task_id: int) -> GenerationTask:
@@ -507,31 +658,81 @@ def _parse_generation_request(text: str | None) -> tuple[TargetOutput, str | Non
         return None
 
     lowered = normalized.lower()
-    for prefix in _IMAGE_REQUEST_PREFIXES:
-        remainder = _strip_prefix(normalized, lowered, prefix)
-        if remainder is not None:
-            return TargetOutput.image, remainder or None
-    for prefix in _VIDEO_REQUEST_PREFIXES:
-        remainder = _strip_prefix(normalized, lowered, prefix)
-        if remainder is not None:
-            return TargetOutput.video, remainder or None
+    prefix_matches: list[tuple[int, TargetOutput, str | None]] = []
+    for target_output, prefixes in (
+        (TargetOutput.image, _IMAGE_REQUEST_PREFIXES),
+        (TargetOutput.video, _VIDEO_REQUEST_PREFIXES),
+    ):
+        for prefix in prefixes:
+            remainder = _strip_prefix(normalized, lowered, prefix)
+            if remainder is not None:
+                prefix_matches.append((len(prefix), target_output, remainder or None))
+
+    if prefix_matches:
+        _prefix_length, target_output, remainder = max(prefix_matches, key=lambda match: match[0])
+        return target_output, remainder
     return None
 
 
 _IMAGE_REQUEST_PREFIXES = (
     "生成图片",
+    "生成圖片",
     "生成照片",
     "生图",
+    "生圖",
     "出图",
-    "图片",
-    "照片",
+    "出圖",
     "改图",
+    "改圖",
     "改照片",
     "修图",
+    "修圖",
+    "图片编辑",
+    "圖片編輯",
+    "编辑图片",
+    "編輯圖片",
+    "编辑图",
+    "編輯圖",
+    "图片",
+    "圖片",
+    "照片",
     "p图",
+    "p圖",
+    "generate image",
+    "generate photo",
+    "generate picture",
+    "create image",
+    "create photo",
+    "create picture",
+    "make image",
+    "make photo",
+    "make picture",
+    "text to image",
+    "txt2img",
+    "t2i",
+    "edit image",
+    "edit photo",
+    "edit picture",
+    "image edit",
+    "photo edit",
+    "picture edit",
+    "modify image",
+    "modify photo",
+    "modify picture",
+    "retouch image",
+    "retouch photo",
+    "retouch picture",
+    "fix image",
+    "fix photo",
+    "fix picture",
+    "enhance image",
+    "enhance photo",
+    "enhance picture",
     "image",
     "photo",
     "picture",
+    "edit",
+    "retouch",
 )
 _VIDEO_REQUEST_PREFIXES = (
     "生成视频",
@@ -540,9 +741,60 @@ _VIDEO_REQUEST_PREFIXES = (
     "文生视频",
     "图生视频",
     "视频",
+    "generate video",
+    "create video",
+    "make video",
+    "text to video",
+    "image to video",
+    "photo to video",
+    "picture to video",
+    "animate image",
+    "animate photo",
+    "animate picture",
+    "txt2video",
+    "txt2vid",
+    "img2video",
+    "img2vid",
+    "t2v",
+    "i2v",
     "video",
 )
 _PREFIX_SEPARATORS = (" ", "，", ",", "。", "：", ":", "-", "—", "_")
+_SOURCE_MEDIA_EDIT_HINTS = (
+    "edit",
+    "change",
+    "replace",
+    "restyle",
+    "modify",
+    "retouch",
+    "fix",
+    "enhance",
+    "outfit",
+    "clothing",
+    "dress",
+    "background",
+    "修改",
+    "编辑",
+    "改成",
+    "变成",
+    "替换",
+    "换",
+    "换个",
+    "换掉",
+    "脱",
+    "去掉",
+    "去除",
+    "删除",
+    "移除",
+    "增加",
+    "添加",
+    "背景",
+    "衣服",
+    "服装",
+    "皮肤",
+    "p图",
+    "美化",
+)
 
 
 def _strip_prefix(original: str, lowered: str, prefix: str) -> str | None:
@@ -556,6 +808,22 @@ def _strip_prefix(original: str, lowered: str, prefix: str) -> str | None:
     if remainder.startswith(_PREFIX_SEPARATORS):
         remainder = remainder[1:].strip()
     return remainder or None
+
+
+def _image_request_needs_source_media(
+    target_output: TargetOutput,
+    effective_text: str | None,
+) -> bool:
+    if target_output != TargetOutput.image:
+        return False
+    normalized = _normalize_generation_text(effective_text)
+    if not normalized:
+        return False
+    return any(token in normalized for token in _SOURCE_MEDIA_EDIT_HINTS)
+
+
+def _normalize_generation_text(text: str | None) -> str:
+    return " ".join((text or "").strip().lower().split())
 
 
 def _preflight_acceptance_message(preflight: GenerationPreflight) -> str:
@@ -575,6 +843,47 @@ def _task_kind_label(kind: TaskKind) -> str:
         TaskKind.prompt_expand: "提示词扩写任务",
     }
     return labels.get(kind, "生成任务")
+
+
+async def _build_status_message(settings: Settings) -> str:
+    lines = [
+        "系统状态：",
+        "Bot：在线",
+        f"ComfyUI：{await _http_status_label(f'{settings.comfyui_base_url}/system_stats')}",
+    ]
+    if _llm_uses_ollama(settings):
+        lines.append(f"Ollama：{await _http_status_label(f'{settings.ollama_base_url}/api/tags')}")
+    if _llm_uses_minimax(settings):
+        lines.append(f"MiniMax：{'已配置' if settings.minimax_api_key else '未配置'}")
+    lines.append("")
+    lines.append("能收到这条回复，表示 Telegram 轮询和消息处理在线。")
+    return "\n".join(lines)
+
+
+async def _http_status_label(url: str) -> str:
+    try:
+        async with httpx.AsyncClient(timeout=3, trust_env=False) as client:
+            response = await client.get(url)
+            response.raise_for_status()
+        return "在线"
+    except Exception:
+        return "离线"
+
+
+def _llm_uses_ollama(settings: Settings) -> bool:
+    return (
+        settings.llm_logic_provider_name == "ollama"
+        or settings.llm_prompt_provider_name == "ollama"
+        or settings.llm_vision_provider_name == "ollama"
+    )
+
+
+def _llm_uses_minimax(settings: Settings) -> bool:
+    return (
+        settings.llm_logic_provider_name == "minimax"
+        or settings.llm_prompt_provider_name == "minimax"
+        or settings.llm_vision_provider_name == "minimax_mcp"
+    )
 
 
 def _load_active_workflows() -> list[Workflow]:
@@ -726,6 +1035,8 @@ async def _clear_pending_followup_state_for_tests() -> None:
         _pending_instructions.clear()
     async with _duplicate_message_lock:
         _recent_inbound_messages.clear()
+        _recent_generation_requests.clear()
+        _recent_regeneration_requests.clear()
 
 
 async def _is_consecutive_duplicate_message(
@@ -783,7 +1094,7 @@ async def _is_redis_consecutive_duplicate_message(
 local current = redis.call('GET', KEYS[1])
 local is_duplicate = 0
 if current then
-  local separator = string.find(current, '\n', 1, true)
+  local separator = string.find(current, '\\n', 1, true)
   local current_fingerprint = current
   local current_message_id = ''
   if separator then
@@ -797,7 +1108,7 @@ end
 if is_duplicate == 1 then
   redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
 else
-  redis.call('SET', KEYS[1], ARGV[1] .. '\n' .. ARGV[2], 'EX', tonumber(ARGV[3]))
+  redis.call('SET', KEYS[1], ARGV[1] .. '\\n' .. ARGV[2], 'EX', tonumber(ARGV[3]))
 end
 return is_duplicate
         """,
@@ -822,8 +1133,193 @@ async def _dedupe_redis_client(redis_url: str) -> Any:
     return client
 
 
+async def _is_duplicate_generation_request(
+    inbound,
+    effective_text: str | None,
+    target_output: TargetOutput,
+    settings: Settings,
+) -> bool:
+    fingerprint = _generation_request_fingerprint(inbound, effective_text, target_output)
+    if not fingerprint:
+        return False
+    if settings.telegram_update_queue_url:
+        try:
+            return await _is_redis_duplicate_generation_request(inbound, fingerprint, settings)
+        except Exception:
+            logger.exception("Redis Telegram generation duplicate check failed; falling back to memory.")
+
+    now = time.monotonic()
+    window_seconds = max(0, settings.telegram_duplicate_message_window_seconds)
+    key = _followup_key(inbound)
+    async with _duplicate_message_lock:
+        cutoff = now - window_seconds
+        for recent_key, recent in list(_recent_generation_requests.items()):
+            if recent.updated_at < cutoff:
+                _recent_generation_requests.pop(recent_key, None)
+
+        recent = _recent_generation_requests.get(key)
+        is_duplicate = (
+            recent is not None
+            and recent.fingerprint == fingerprint
+            and recent.message_id != inbound.message_id
+            and now - recent.updated_at <= window_seconds
+        )
+        _recent_generation_requests[key] = _RecentInboundMessage(
+            fingerprint=fingerprint,
+            message_id=recent.message_id if is_duplicate and recent else inbound.message_id,
+            updated_at=now,
+        )
+        return is_duplicate
+
+
+async def _is_redis_duplicate_generation_request(
+    inbound,
+    fingerprint: str,
+    settings: Settings,
+) -> bool:
+    window_seconds = max(1, settings.telegram_duplicate_message_window_seconds)
+    redis = await _dedupe_redis_client(settings.telegram_update_queue_url)
+    key_hash = hashlib.sha256(
+        f"{inbound.chat_id}\0{inbound.telegram_id}\0generation".encode()
+    ).hexdigest()
+    key = f"{settings.telegram_update_queue_stream}:generation-dedupe:{key_hash}"
+    result = await redis.eval(
+        """
+local current = redis.call('GET', KEYS[1])
+local is_duplicate = 0
+if current then
+  local separator = string.find(current, '\\n', 1, true)
+  local current_fingerprint = current
+  local current_message_id = ''
+  if separator then
+    current_fingerprint = string.sub(current, 1, separator - 1)
+    current_message_id = string.sub(current, separator + 1)
+  end
+  if current_fingerprint == ARGV[1] and current_message_id ~= ARGV[2] then
+    is_duplicate = 1
+  end
+end
+if is_duplicate == 1 then
+  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[3]))
+else
+  redis.call('SET', KEYS[1], ARGV[1] .. '\\n' .. ARGV[2], 'EX', tonumber(ARGV[3]))
+end
+return is_duplicate
+        """,
+        1,
+        key,
+        fingerprint,
+        inbound.message_id,
+        window_seconds,
+    )
+    return int(result) == 1
+
+
+async def _is_duplicate_regeneration_request(
+    callback_query: TelegramCallbackQuery,
+    source_task_id: int,
+    settings: Settings,
+) -> bool:
+    cooldown_seconds = max(0, settings.telegram_regenerate_cooldown_seconds)
+    if cooldown_seconds <= 0:
+        return False
+    fingerprint = f"regenerate:{source_task_id}"
+    if settings.telegram_update_queue_url:
+        try:
+            return await _is_redis_duplicate_regeneration_request(
+                callback_query,
+                source_task_id,
+                fingerprint,
+                settings,
+            )
+        except Exception:
+            logger.exception("Redis Telegram regeneration duplicate check failed; falling back to memory.")
+
+    now = time.monotonic()
+    key = _regeneration_key(callback_query, source_task_id)
+    async with _duplicate_message_lock:
+        cutoff = now - cooldown_seconds
+        for recent_key, recent in list(_recent_regeneration_requests.items()):
+            if recent.updated_at < cutoff:
+                _recent_regeneration_requests.pop(recent_key, None)
+
+        recent = _recent_regeneration_requests.get(key)
+        is_duplicate = (
+            recent is not None
+            and recent.fingerprint == fingerprint
+            and now - recent.updated_at <= cooldown_seconds
+        )
+        _recent_regeneration_requests[key] = _RecentInboundMessage(
+            fingerprint=fingerprint,
+            message_id=callback_query.callback_query_id,
+            updated_at=now,
+        )
+        return is_duplicate
+
+
+async def _is_redis_duplicate_regeneration_request(
+    callback_query: TelegramCallbackQuery,
+    source_task_id: int,
+    fingerprint: str,
+    settings: Settings,
+) -> bool:
+    cooldown_seconds = max(1, settings.telegram_regenerate_cooldown_seconds)
+    redis = await _dedupe_redis_client(settings.telegram_update_queue_url)
+    key_hash = hashlib.sha256(
+        (
+            f"{callback_query.chat_id}\0{callback_query.telegram_id}"
+            f"\0regenerate\0{source_task_id}"
+        ).encode()
+    ).hexdigest()
+    key = f"{settings.telegram_update_queue_stream}:regenerate-dedupe:{key_hash}"
+    result = await redis.eval(
+        """
+local existed = redis.call('EXISTS', KEYS[1])
+if existed == 1 then
+  redis.call('EXPIRE', KEYS[1], tonumber(ARGV[2]))
+  return 1
+end
+redis.call('SET', KEYS[1], ARGV[1], 'EX', tonumber(ARGV[2]))
+return 0
+        """,
+        1,
+        key,
+        fingerprint,
+        cooldown_seconds,
+    )
+    return int(result) == 1
+
+
+def _regeneration_key(
+    callback_query: TelegramCallbackQuery,
+    source_task_id: int,
+) -> tuple[str, str, str]:
+    return callback_query.chat_id, callback_query.telegram_id, str(source_task_id)
+
+
+def _generation_request_fingerprint(
+    inbound,
+    effective_text: str | None,
+    target_output: TargetOutput,
+) -> str | None:
+    normalized_text = _normalize_generation_text(effective_text)
+    source_media = inbound.source_file_id or ""
+    source_media_type = inbound.source_media_type or ""
+    if not normalized_text and not source_media:
+        return None
+    raw_fingerprint = "\n".join(
+        [
+            f"target_output={target_output.value}",
+            f"text={normalized_text}",
+            f"source_media_type={source_media_type}",
+            f"source_file_id={source_media}",
+        ]
+    )
+    return hashlib.sha256(raw_fingerprint.encode()).hexdigest()
+
+
 def _inbound_message_fingerprint(inbound) -> str | None:
-    normalized_text = " ".join((inbound.text or "").strip().lower().split())
+    normalized_text = _normalize_generation_text(inbound.text)
     source_media = inbound.source_file_id or ""
     source_media_type = inbound.source_media_type or ""
     if not normalized_text and not source_media:

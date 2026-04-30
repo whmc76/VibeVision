@@ -14,9 +14,24 @@ import httpx
 from app.core.config import Settings
 from app.models import TaskKind
 
+REGENERATE_CALLBACK_PREFIX = "regenerate:"
+
 
 def build_remove_keyboard_markup() -> dict[str, bool]:
     return {"remove_keyboard": True}
+
+
+def build_regenerate_result_markup(task_id: int) -> dict[str, list[list[dict[str, str]]]]:
+    return {
+        "inline_keyboard": [
+            [
+                {
+                    "text": "重新生成",
+                    "callback_data": f"{REGENERATE_CALLBACK_PREFIX}{task_id}",
+                }
+            ]
+        ]
+    }
 
 
 def build_bot_commands() -> list[dict[str, str]]:
@@ -24,6 +39,7 @@ def build_bot_commands() -> list[dict[str, str]]:
         {"command": "photo", "description": "照片工作流"},
         {"command": "video", "description": "视频工作流"},
         {"command": "check", "description": "套餐和剩余点数"},
+        {"command": "status", "description": "系统在线状态"},
         {"command": "start", "description": "欢迎与使用说明"},
     ]
 
@@ -38,6 +54,17 @@ class TelegramInboundMessage:
     text: str | None
     source_file_id: str | None
     source_media_type: str | None
+
+
+@dataclass(frozen=True)
+class TelegramCallbackQuery:
+    callback_query_id: str
+    telegram_id: str
+    chat_id: str
+    message_id: str | None
+    username: str | None
+    display_name: str | None
+    data: str
 
 
 @dataclass(frozen=True)
@@ -58,6 +85,23 @@ class TelegramUpdateError(ValueError):
 
 REQUEST_RETRY_DELAYS = (1.0, 2.0)
 UPLOAD_TIMEOUT_SECONDS = 180
+MAX_RESULT_CAPTION_CHARS = 1_024
+
+
+def build_result_caption(
+    prompt: str | None,
+    task_id: int | None = None,
+    *,
+    include_prompt: bool = False,
+) -> str:
+    lines = ["生成结果"]
+    if task_id is not None:
+        lines.append(f"任务 ID: {task_id}")
+    if include_prompt:
+        clean_prompt = _clean_caption_text(prompt)
+        if clean_prompt:
+            lines.append(f"提示词: {clean_prompt}")
+    return _truncate_caption("\n".join(lines))
 
 
 class TelegramClient:
@@ -101,6 +145,36 @@ class TelegramClient:
             text=text,
             source_file_id=source_file_id,
             source_media_type=source_media_type,
+        )
+
+    def parse_callback_query(self, update: dict) -> TelegramCallbackQuery | None:
+        callback_query = update.get("callback_query")
+        if not isinstance(callback_query, dict):
+            return None
+
+        callback_query_id = callback_query.get("id")
+        from_user = callback_query.get("from") or {}
+        message = callback_query.get("message") or {}
+        chat = message.get("chat") or {}
+        telegram_id = from_user.get("id")
+        chat_id = chat.get("id")
+        data = callback_query.get("data")
+        if callback_query_id is None or telegram_id is None or chat_id is None or not isinstance(data, str):
+            raise TelegramUpdateError("Telegram callback query is missing required fields.")
+
+        first_name = from_user.get("first_name") or ""
+        last_name = from_user.get("last_name") or ""
+        display_name = " ".join(part for part in [first_name, last_name] if part).strip() or None
+        message_id = message.get("message_id")
+
+        return TelegramCallbackQuery(
+            callback_query_id=str(callback_query_id),
+            telegram_id=str(telegram_id),
+            chat_id=str(chat_id),
+            message_id=str(message_id) if message_id is not None else None,
+            username=from_user.get("username"),
+            display_name=display_name,
+            data=data,
         )
 
     def _extract_source_media(self, message: dict) -> tuple[str | None, str | None]:
@@ -164,7 +238,7 @@ class TelegramClient:
         payload: dict[str, int | list[str]] = {
             "timeout": timeout,
             "limit": limit,
-            "allowed_updates": ["message", "edited_message", "my_chat_member"],
+            "allowed_updates": ["message", "edited_message", "callback_query", "my_chat_member"],
         }
         if offset is not None:
             payload["offset"] = offset
@@ -187,7 +261,13 @@ class TelegramClient:
         }
         if reply_to_message_id:
             payload["reply_to_message_id"] = int(reply_to_message_id)
-        await self._request("sendMessage", payload)
+        await self._request("sendMessage", payload, retry=False)
+
+    async def answer_callback_query(self, callback_query_id: str, text: str | None = None) -> None:
+        payload: dict[str, object] = {"callback_query_id": callback_query_id}
+        if text:
+            payload["text"] = text
+        await self._request("answerCallbackQuery", payload, retry=False)
 
     async def send_result_media(
         self,
@@ -195,18 +275,22 @@ class TelegramClient:
         urls: list[str],
         kind: TaskKind,
         reply_to_message_id: str | None = None,
+        caption: str | None = None,
+        reply_markup: dict[str, object] | None = None,
     ) -> None:
         if not urls:
             await self.send_message(chat_id, "任务完成，但没有找到输出文件。", reply_to_message_id)
             return
 
+        first_caption = caption or build_result_caption(None)
         for index, url in enumerate(urls[:4], start=1):
             await self._send_url_as_upload(
                 chat_id=chat_id,
                 url=url,
                 kind=kind,
-                caption="生成结果" if index == 1 else None,
+                caption=first_caption if index == 1 else None,
                 reply_to_message_id=reply_to_message_id if index == 1 else None,
+                reply_markup=reply_markup if index == 1 else None,
             )
 
     async def _send_url_as_upload(
@@ -216,6 +300,7 @@ class TelegramClient:
         kind: TaskKind,
         caption: str | None,
         reply_to_message_id: str | None,
+        reply_markup: dict[str, object] | None = None,
     ) -> None:
         async with httpx.AsyncClient(timeout=60) as client:
             response = await client.get(url)
@@ -239,6 +324,8 @@ class TelegramClient:
             data["caption"] = caption
         if reply_to_message_id:
             data["reply_to_message_id"] = int(reply_to_message_id)
+        if reply_markup:
+            data["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False, separators=(",", ":"))
 
         await self._upload_request(
             method=method,
@@ -249,14 +336,24 @@ class TelegramClient:
             content_type=content_type,
         )
 
-    async def _request(self, method: str, payload: dict, timeout: int = 30) -> Any:
-        return await asyncio.to_thread(self._request_sync, method, payload, timeout)
+    async def _request(
+        self,
+        method: str,
+        payload: dict,
+        timeout: int = 30,
+        *,
+        retry: bool = True,
+    ) -> Any:
+        return await asyncio.to_thread(self._request_sync, method, payload, timeout, retry)
 
-    def _request_sync(self, method: str, payload: dict, timeout: int) -> Any:
-        body = self._execute_request_with_retry(
-            lambda: self._build_json_request(method, payload),
-            timeout=timeout,
-        )
+    def _request_sync(self, method: str, payload: dict, timeout: int, retry: bool = True) -> Any:
+        def build_request() -> Request:
+            return self._build_json_request(method, payload)
+
+        if retry:
+            body = self._execute_request_with_retry(build_request, timeout=timeout)
+        else:
+            body = self._execute_request(build_request(), timeout=timeout)
         return body.get("result") if "result" in body else {}
 
     async def _upload_request(
@@ -399,3 +496,13 @@ class TelegramClient:
         parts.append(b"\r\n")
         parts.append(f"--{boundary}--\r\n".encode())
         return b"".join(parts)
+
+
+def _clean_caption_text(value: str | None) -> str:
+    return " ".join((value or "").split()).strip()
+
+
+def _truncate_caption(value: str) -> str:
+    if len(value) <= MAX_RESULT_CAPTION_CHARS:
+        return value
+    return f"{value[: MAX_RESULT_CAPTION_CHARS - 3].rstrip()}..."

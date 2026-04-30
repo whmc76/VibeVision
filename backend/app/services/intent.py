@@ -1,6 +1,8 @@
 import base64
 import json
+import logging
 import re
+import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from enum import StrEnum
@@ -12,6 +14,9 @@ from app.core.config import Settings
 from app.models import TaskKind, Workflow
 from app.services.concurrency import concurrency_slot
 from app.services.gpu_memory import ollama_gpu_scope, ollama_keep_alive_value
+from app.workflows import RETIRED_WORKFLOW_KEYS
+
+logger = logging.getLogger(__name__)
 
 
 class TargetOutput(StrEnum):
@@ -57,7 +62,9 @@ class IntentService:
         source_media_url: str | None = None,
         source_media_type: str | None = None,
         target_output: TargetOutput | str | None = None,
+        finalize_prompt: bool = True,
     ) -> IntentResult:
+        request_started_at = time.perf_counter()
         content = (text or "").strip()
         resolved_target = self.normalize_target_output(target_output)
         workflow_routes = self._build_workflow_routes(available_workflows)
@@ -70,10 +77,21 @@ class IntentService:
 
         media_attached = has_image or bool(source_media_url)
         normalized_media_type = self.normalize_media_type(source_media_type)
+        stage_started_at = time.perf_counter()
         images, vision_context = await self._load_visual_inputs(
             source_media_url=source_media_url,
             source_media_type=normalized_media_type,
             user_text=content,
+        )
+        logger.info(
+            "intent_visual_inputs_complete provider=%s media_attached=%s source_media=%s image_count=%s context_chars=%s elapsed=%.2fs total=%.2fs",
+            self.settings.llm_vision_provider_name,
+            media_attached,
+            normalized_media_type or "none",
+            len(images),
+            len(vision_context),
+            time.perf_counter() - stage_started_at,
+            time.perf_counter() - request_started_at,
         )
 
         if not content and media_attached and not images and not vision_context and not resolved_target:
@@ -91,6 +109,7 @@ class IntentService:
             )
 
         try:
+            stage_started_at = time.perf_counter()
             intent = await self._classify_with_llm(
                 text=content,
                 workflow_routes=workflow_routes,
@@ -100,7 +119,22 @@ class IntentService:
                 images=images,
                 vision_context=vision_context,
             )
+            logger.info(
+                "intent_router_complete provider=%s workflow=%s kind=%s elapsed=%.2fs total=%.2fs",
+                self.settings.llm_logic_provider_name,
+                intent.workflow_key,
+                intent.kind.value,
+                time.perf_counter() - stage_started_at,
+                time.perf_counter() - request_started_at,
+            )
         except (httpx.HTTPError, ValueError, KeyError, json.JSONDecodeError):
+            logger.warning(
+                "Intent LLM classification failed; using fallback router. provider=%s elapsed=%.2fs total=%.2fs",
+                self.settings.llm_logic_provider_name,
+                time.perf_counter() - stage_started_at,
+                time.perf_counter() - request_started_at,
+                exc_info=True,
+            )
             intent = self._fallback_classify(
                 text=content,
                 workflow_routes=workflow_routes,
@@ -108,7 +142,17 @@ class IntentService:
                 source_media_type=normalized_media_type,
                 target_output=resolved_target,
             )
-        return await self._finalize_intent_result(
+        if not finalize_prompt:
+            logger.info(
+                "intent_finalize_skipped workflow=%s kind=%s total=%.2fs",
+                intent.workflow_key,
+                intent.kind.value,
+                time.perf_counter() - request_started_at,
+            )
+            return intent
+
+        stage_started_at = time.perf_counter()
+        finalized = await self._finalize_intent_result(
             intent=intent,
             text=content,
             workflow_routes=workflow_routes,
@@ -116,6 +160,37 @@ class IntentService:
             source_media_type=normalized_media_type,
             images=images,
             vision_context=vision_context,
+        )
+        logger.info(
+            "intent_finalize_complete workflow=%s kind=%s elapsed=%.2fs total=%.2fs",
+            finalized.workflow_key,
+            finalized.kind.value,
+            time.perf_counter() - stage_started_at,
+            time.perf_counter() - request_started_at,
+        )
+        return finalized
+
+    async def enhance_task_prompt(
+        self,
+        *,
+        workflow: Workflow,
+        user_text: str | None,
+        router_prompt: str | None,
+        source_media_url: str | None = None,
+        source_media_type: str | None = None,
+    ) -> str:
+        route = self._route_for_workflow(workflow)
+        if not route:
+            return self._clean_prompt_text(router_prompt) or self._clean_prompt_text(user_text)
+        return await self._finalize_prompt(
+            workflow=route,
+            user_text=self._clean_prompt_text(user_text),
+            router_prompt=self._clean_prompt_text(router_prompt),
+            media_attached=bool(source_media_url),
+            source_media_type=self.normalize_media_type(source_media_type)
+            or ("image" if source_media_url else None),
+            images=[],
+            vision_context="",
         )
 
     def resolve_target_output(
@@ -130,6 +205,31 @@ class IntentService:
         normalized = self._normalize_text(text)
         if not normalized:
             raise TargetOutputRequiredError(self._target_required_message())
+
+        if any(
+            phrase in normalized
+            for phrase in [
+                "generate video",
+                "create video",
+                "make video",
+                "text to video",
+                "image to video",
+                "photo to video",
+                "picture to video",
+                "animate image",
+                "animate photo",
+                "animate picture",
+                "txt2video",
+                "txt2vid",
+                "img2video",
+                "img2vid",
+                "t2v",
+                "i2v",
+                "图生视频",
+                "文生视频",
+            ]
+        ):
+            return TargetOutput.video
 
         image_hit = self._mentions_image_target(normalized)
         video_hit = self._mentions_video_target(normalized)
@@ -280,14 +380,31 @@ class IntentService:
             "response_format": {"type": "json_object"},
         }
 
-        async with httpx.AsyncClient(
-            base_url=self.settings.minimax_base_url,
-            headers=self._minimax_headers(),
-            timeout=self.settings.minimax_timeout_seconds,
-        ) as client:
-            response = await client.post("/chat/completions", json=payload)
-            response.raise_for_status()
-            body = response.json()
+        try:
+            async with httpx.AsyncClient(
+                base_url=self.settings.minimax_base_url,
+                headers=self._minimax_headers(),
+                timeout=self._minimax_timeout(self.settings.minimax_timeout_seconds),
+                trust_env=False,
+            ) as client:
+                response = await client.post(
+                    self.settings.minimax_chat_completions_path,
+                    json=payload,
+                )
+                self._raise_for_minimax_status(response, stage="logic routing")
+                body = response.json()
+                if not isinstance(body, dict):
+                    raise ValueError("MiniMax logic routing response was not a JSON object.")
+                self._raise_for_minimax_api_error(body, stage="logic routing", response=response)
+        except (httpx.HTTPError, ValueError, KeyError, json.JSONDecodeError):
+            logger.warning(
+                "MiniMax logic routing request failed. base_url=%s path=%s model=%s",
+                self.settings.minimax_base_url,
+                self.settings.minimax_chat_completions_path,
+                logic_model,
+                exc_info=True,
+            )
+            raise
 
         data = self._loads_json_object(self._chat_completion_content(body))
         return self._intent_result_from_router_data(
@@ -444,8 +561,14 @@ class IntentService:
             or self._default_prompt_for(workflow)
         )
         if not self._should_enhance_prompt(workflow, user_text):
+            logger.info(
+                "intent_prompt_enhance_skipped workflow=%s kind=%s",
+                workflow.workflow_key,
+                workflow.kind.value,
+            )
             return base_prompt
 
+        stage_started_at = time.perf_counter()
         try:
             enhanced_prompt = await self._enhance_prompt_with_llm(
                 workflow=workflow,
@@ -457,7 +580,20 @@ class IntentService:
                 vision_context=vision_context,
             )
         except (httpx.HTTPError, ValueError):
+            logger.warning(
+                "Prompt enhancement failed; using router prompt. provider=%s workflow_key=%s elapsed=%.2fs",
+                self.settings.llm_prompt_provider_name,
+                workflow.workflow_key,
+                time.perf_counter() - stage_started_at,
+                exc_info=True,
+            )
             return base_prompt
+        logger.info(
+            "intent_prompt_enhance_complete provider=%s workflow=%s elapsed=%.2fs",
+            self.settings.llm_prompt_provider_name,
+            workflow.workflow_key,
+            time.perf_counter() - stage_started_at,
+        )
         return self._limit_prompt_text(self._clean_prompt_text(enhanced_prompt)) or base_prompt
 
     async def _classify_with_llm(
@@ -555,14 +691,35 @@ class IntentService:
             "max_tokens": 320,
         }
 
-        async with httpx.AsyncClient(
-            base_url=self.settings.minimax_base_url,
-            headers=self._minimax_headers(),
-            timeout=self.settings.minimax_timeout_seconds,
-        ) as client:
-            response = await client.post("/chat/completions", json=payload)
-            response.raise_for_status()
-            body = response.json()
+        try:
+            async with httpx.AsyncClient(
+                base_url=self.settings.minimax_base_url,
+                headers=self._minimax_headers(),
+                timeout=self._minimax_timeout(self.settings.minimax_timeout_seconds),
+                trust_env=False,
+            ) as client:
+                response = await client.post(
+                    self.settings.minimax_chat_completions_path,
+                    json=payload,
+                )
+                self._raise_for_minimax_status(response, stage="prompt enhancement")
+                body = response.json()
+                if not isinstance(body, dict):
+                    raise ValueError("MiniMax prompt enhancement response was not a JSON object.")
+                self._raise_for_minimax_api_error(
+                    body,
+                    stage="prompt enhancement",
+                    response=response,
+                )
+        except (httpx.HTTPError, ValueError, KeyError, json.JSONDecodeError):
+            logger.warning(
+                "MiniMax prompt enhancement request failed. base_url=%s path=%s model=%s",
+                self.settings.minimax_base_url,
+                self.settings.minimax_chat_completions_path,
+                prompt_model,
+                exc_info=True,
+            )
+            raise
         return self._strip_thinking_text(self._chat_completion_content(body)).strip()
 
     async def _enhance_prompt_with_ollama(
@@ -664,11 +821,68 @@ class IntentService:
         return {
             "Authorization": f"Bearer {self.settings.minimax_api_key}",
             "Content-Type": "application/json",
-            "MM-API-Source": "vibevision-coding-plan-mcp-vision",
+            "MM-API-Source": "Minimax-MCP",
         }
 
     def _single_connection_limits(self) -> httpx.Limits:
         return httpx.Limits(max_connections=1, max_keepalive_connections=1)
+
+    def _minimax_timeout(self, seconds: int | float) -> httpx.Timeout:
+        total = max(float(seconds or 1), 1.0)
+        connect = min(5.0, total)
+        return httpx.Timeout(total, connect=connect)
+
+    def _raise_for_minimax_status(self, response: httpx.Response, *, stage: str) -> None:
+        try:
+            response.raise_for_status()
+        except httpx.HTTPStatusError as exc:
+            logger.warning(
+                "MiniMax %s HTTP error. status=%s url=%s trace_id=%s body=%s",
+                stage,
+                response.status_code,
+                self._response_url(response),
+                response.headers.get("Trace-Id") or response.headers.get("trace-id"),
+                self._response_preview(response),
+            )
+            raise exc
+
+    def _raise_for_minimax_api_error(
+        self,
+        body: dict[str, Any],
+        *,
+        stage: str,
+        response: httpx.Response,
+    ) -> None:
+        base_resp = body.get("base_resp")
+        if not isinstance(base_resp, dict):
+            return
+        status_code = base_resp.get("status_code")
+        if status_code in {None, 0, "0"}:
+            return
+        status_msg = str(base_resp.get("status_msg") or "unknown MiniMax API error")
+        trace_id = response.headers.get("Trace-Id") or response.headers.get("trace-id")
+        logger.warning(
+            "MiniMax %s API error. status_code=%s status_msg=%s trace_id=%s",
+            stage,
+            status_code,
+            status_msg,
+            trace_id,
+        )
+        raise ValueError(
+            f"MiniMax {stage} API error: {status_code}-{status_msg}; trace_id={trace_id or 'none'}"
+        )
+
+    def _response_preview(self, response: httpx.Response) -> str:
+        text = response.text.strip()
+        if len(text) <= 800:
+            return text
+        return f"{text[:800]}..."
+
+    def _response_url(self, response: httpx.Response) -> str:
+        try:
+            return str(response.request.url)
+        except RuntimeError:
+            return "unknown"
 
     def _chat_completion_content(self, body: dict[str, Any]) -> str:
         choices = body.get("choices")
@@ -719,14 +933,33 @@ class IntentService:
 
         provider = self.settings.llm_vision_provider_name
         if provider == "ollama":
-            return await self._load_ollama_images(source_media_url), ""
+            stage_started_at = time.perf_counter()
+            images = await self._load_ollama_images(source_media_url)
+            logger.info(
+                "intent_ollama_image_load_complete image_count=%s elapsed=%.2fs",
+                len(images),
+                time.perf_counter() - stage_started_at,
+            )
+            return images, ""
         if provider == "minimax_mcp":
+            stage_started_at = time.perf_counter()
             try:
-                return [], await self._understand_image_with_minimax_mcp(
+                vision_context = await self._understand_image_with_minimax_mcp(
                     source_media_url=source_media_url,
                     user_text=user_text,
                 )
+                logger.info(
+                    "intent_minimax_vision_complete context_chars=%s elapsed=%.2fs",
+                    len(vision_context),
+                    time.perf_counter() - stage_started_at,
+                )
+                return [], vision_context
             except (httpx.HTTPError, ValueError, KeyError):
+                logger.warning(
+                    "MiniMax MCP vision failed; continuing without vision context. elapsed=%.2fs",
+                    time.perf_counter() - stage_started_at,
+                    exc_info=True,
+                )
                 return [], ""
         return [], ""
 
@@ -748,18 +981,36 @@ class IntentService:
             f"User request: {self._clean_prompt_text(user_text) or 'none'}"
         )
         payload = {"prompt": prompt, "image_url": image_url}
-        async with httpx.AsyncClient(
-            base_url=self.settings.minimax_api_host,
-            headers=self._minimax_mcp_headers(),
-            timeout=self.settings.minimax_vision_timeout_seconds,
-        ) as client:
-            response = await client.post("/v1/coding_plan/vlm", json=payload)
-            response.raise_for_status()
-            body = response.json()
+        try:
+            async with httpx.AsyncClient(
+                base_url=self.settings.minimax_api_host,
+                headers=self._minimax_mcp_headers(),
+                timeout=self._minimax_timeout(self.settings.minimax_vision_timeout_seconds),
+                trust_env=False,
+            ) as client:
+                response = await client.post(self.settings.minimax_mcp_vlm_path, json=payload)
+                self._raise_for_minimax_status(response, stage="MCP vision")
+                body = response.json()
+                if not isinstance(body, dict):
+                    raise ValueError("MiniMax MCP vision response was not a JSON object.")
+                self._raise_for_minimax_api_error(body, stage="MCP vision", response=response)
+        except (httpx.HTTPError, ValueError, KeyError, json.JSONDecodeError):
+            logger.warning(
+                "MiniMax MCP vision request failed. base_url=%s path=%s",
+                self.settings.minimax_api_host,
+                self.settings.minimax_mcp_vlm_path,
+                exc_info=True,
+            )
+            raise
         return self._extract_minimax_mcp_text(body)
 
     async def _load_minimax_image_data_url(self, source_media_url: str) -> str:
-        async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        timeout_seconds = min(float(self.settings.minimax_vision_timeout_seconds or 1), 15.0)
+        async with httpx.AsyncClient(
+            timeout=self._minimax_timeout(timeout_seconds),
+            follow_redirects=True,
+            trust_env=False,
+        ) as client:
             async with client.stream("GET", source_media_url) as response:
                 response.raise_for_status()
                 content_type = response.headers.get("content-type", "").lower()
@@ -864,6 +1115,8 @@ class IntentService:
 
     def _route_for_workflow(self, workflow: Workflow) -> WorkflowRoute | None:
         if not workflow.is_active:
+            return None
+        if workflow.comfy_workflow_key in RETIRED_WORKFLOW_KEYS:
             return None
         return WorkflowRoute(
             workflow_key=workflow.comfy_workflow_key,
@@ -1131,9 +1384,42 @@ class IntentService:
                 "生图",
                 "出图",
                 "修图",
+                "图片编辑",
+                "编辑图",
+                "编辑图片",
                 "p图",
                 "改图",
                 "改照片",
+                "generate image",
+                "generate photo",
+                "generate picture",
+                "create image",
+                "create photo",
+                "create picture",
+                "make image",
+                "make photo",
+                "make picture",
+                "text to image",
+                "txt2img",
+                "t2i",
+                "edit image",
+                "edit photo",
+                "edit picture",
+                "image edit",
+                "photo edit",
+                "picture edit",
+                "modify image",
+                "modify photo",
+                "modify picture",
+                "retouch image",
+                "retouch photo",
+                "retouch picture",
+                "fix image",
+                "fix photo",
+                "fix picture",
+                "enhance image",
+                "enhance photo",
+                "enhance picture",
                 "image",
                 "photo",
                 "picture",
@@ -1152,6 +1438,22 @@ class IntentService:
                 "文生视频",
                 "图生视频",
                 "生视频",
+                "generate video",
+                "create video",
+                "make video",
+                "text to video",
+                "image to video",
+                "photo to video",
+                "picture to video",
+                "animate image",
+                "animate photo",
+                "animate picture",
+                "txt2video",
+                "txt2vid",
+                "img2video",
+                "img2vid",
+                "t2v",
+                "i2v",
                 "video",
                 "movie",
                 "clip",
@@ -1168,6 +1470,28 @@ class IntentService:
                 "change",
                 "replace",
                 "restyle",
+                "modify",
+                "retouch",
+                "fix",
+                "enhance",
+                "edit image",
+                "edit photo",
+                "edit picture",
+                "image edit",
+                "photo edit",
+                "picture edit",
+                "modify image",
+                "modify photo",
+                "modify picture",
+                "retouch image",
+                "retouch photo",
+                "retouch picture",
+                "fix image",
+                "fix photo",
+                "fix picture",
+                "enhance image",
+                "enhance photo",
+                "enhance picture",
                 "outfit",
                 "clothing",
                 "dress",
@@ -1176,6 +1500,10 @@ class IntentService:
                 "编辑",
                 "改图",
                 "改照片",
+                "修图",
+                "图片编辑",
+                "编辑图",
+                "编辑图片",
                 "改",
                 "改成",
                 "变成",
@@ -1196,7 +1524,8 @@ class IntentService:
         return (
             "请先明确选择要生成图片还是视频。"
             "可以直接输入 /photo 或 /p 加描述，或输入 /video 或 /v 加描述；"
-            "也可以在描述里直接写“生图...”“生成图片...”“生视频...”或“生成视频...”。"
+            "也可以在描述里直接写“生图...”“生成图片...”“generate image...”"
+            "“生视频...”“生成视频...”或“generate video...”。"
         )
 
     def _clean_prompt_text(self, text: str | None) -> str:

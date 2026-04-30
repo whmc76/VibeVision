@@ -2,12 +2,14 @@ from collections.abc import Sequence
 from enum import StrEnum
 
 from app.models import MembershipTier, TaskKind, User, Workflow
+from app.workflows import RETIRED_WORKFLOW_KEYS
 
 
 class BotQuickAction(StrEnum):
     image = "image"
     video = "video"
     query = "query"
+    status = "status"
 
 
 _HELP_COMMANDS = {"/start"}
@@ -47,6 +49,7 @@ _HELP_CONTAINS = (
 _IMAGE_COMMANDS = {"/photo", "/p", "/image", "/photos", "/images"}
 _VIDEO_COMMANDS = {"/video", "/v", "/videos"}
 _QUERY_COMMANDS = {"/check", "/query", "/account", "/credits", "/balance", "/vip"}
+_STATUS_COMMANDS = {"/status", "/online", "/health"}
 _QUICK_ACTION_EXACT_MATCHES = {
     BotQuickAction.image: {"照片", "图片"},
     BotQuickAction.video: {"视频"},
@@ -64,13 +67,11 @@ _QUICK_ACTION_EXACT_MATCHES = {
         "我的vip",
         "我的会员",
     },
+    BotQuickAction.status: {"状态", "在线", "系统状态", "是否在线", "在线状态"},
 }
 _CAPABILITY_ORDER = (
     TaskKind.image_generate,
     TaskKind.image_edit,
-    TaskKind.video_text_to_video,
-    TaskKind.video_image_to_video,
-    TaskKind.prompt_expand,
 )
 _IMAGE_MENU_KINDS = (TaskKind.image_generate, TaskKind.image_edit)
 _CAPABILITY_COPY = {
@@ -172,6 +173,8 @@ def resolve_quick_action(text: str | None) -> BotQuickAction | None:
         return BotQuickAction.video
     if command in _QUERY_COMMANDS:
         return BotQuickAction.query
+    if command in _STATUS_COMMANDS:
+        return BotQuickAction.status
 
     normalized = _normalize_text(text)
     if not normalized:
@@ -207,7 +210,12 @@ def build_help_message(
     include_welcome: bool = False,
 ) -> str:
     active_capabilities = _active_capabilities(workflows)
-    active_kinds = active_capabilities.keys() if active_capabilities else _CAPABILITY_ORDER
+    active_kinds = tuple(active_capabilities.keys()) if active_capabilities else _CAPABILITY_ORDER
+    has_image_workflows = any(kind in _IMAGE_MENU_KINDS for kind in active_kinds)
+    has_video_workflows = any(
+        kind in {TaskKind.video_text_to_video, TaskKind.video_image_to_video}
+        for kind in active_kinds
+    )
 
     lines: list[str] = []
     if include_welcome:
@@ -230,14 +238,23 @@ def build_help_message(
     lines.append("")
     lines.append("命令：")
     lines.append("/start 查看欢迎与能力说明")
-    lines.append("/photo 或 /p <描述> 直接提交图片任务")
-    lines.append("/video 或 /v <描述> 直接提交视频任务")
+    if has_image_workflows:
+        lines.append("/photo 或 /p <描述> 直接提交图片任务")
+    if has_video_workflows:
+        lines.append("/video 或 /v <描述> 直接提交视频任务")
     lines.append("/check 查询套餐和剩余点数")
+    lines.append("/status 查看系统在线状态")
     lines.append("")
     lines.append("关键词：")
-    lines.append("生图/生成图片/出图 <描述> 直接提交图片任务")
-    lines.append("生视频/生成视频/出视频 <描述> 直接提交视频任务")
-    lines.append("图生视频 <描述> 配合图片提交视频任务")
+    if has_image_workflows:
+        lines.append("生图/生成图片/出图 <描述> 直接提交图片任务")
+        lines.append("改图/修图/图片编辑/编辑图 <描述> 配合图片提交编辑任务")
+        lines.append("繁體: 生圖/生成圖片/出圖 <描述> 也可以直接提交圖片任務")
+        lines.append("English: generate image/photo/picture, edit image/photo/picture")
+    if has_video_workflows:
+        lines.append("生视频/生成视频/出视频 <描述> 直接提交视频任务")
+        lines.append("图生视频 <描述> 配合图片提交视频任务")
+        lines.append("English: generate video, text to video, image/photo/picture to video")
     lines.append("")
     lines.append("发送图片时，最好附上文字要求，这样我能更准确地理解你的意图。")
     return "\n".join(lines)
@@ -264,6 +281,8 @@ def build_image_workflow_message(workflows: Sequence[Workflow] | None = None) ->
     lines.append("推荐写法：/photo 生成一张赛博朋克风的人像海报")
     lines.append("缩写也可以：/p 生成一张赛博朋克风的人像海报")
     lines.append("关键词也可以：生图 生成一张赛博朋克风的人像海报")
+    lines.append("图片编辑可以写：改图 把背景换成海边")
+    lines.append("English: generate image cyberpunk portrait, edit image change background")
     lines.append("")
     lines.append("直接发送文字描述，或发送图片并附上修改要求。")
     return "\n".join(lines)
@@ -277,7 +296,7 @@ def build_video_workflow_message(workflows: Sequence[Workflow] | None = None) ->
         if kind in active_capabilities
     ]
     if not video_kinds:
-        video_kinds = [TaskKind.video_text_to_video, TaskKind.video_image_to_video]
+        return "当前没有可用的视频工作流。"
 
     lines = ["视频工作流："]
     for index, kind in enumerate(video_kinds, start=1):
@@ -295,6 +314,7 @@ def build_video_workflow_message(workflows: Sequence[Workflow] | None = None) ->
     lines.append("缩写也可以：/v 生成一个霓虹街头雨夜慢镜头短视频")
     lines.append("关键词也可以：生视频 生成一个霓虹街头雨夜慢镜头短视频")
     lines.append("图生视频可以写：图生视频 镜头缓慢推进")
+    lines.append("English: generate video neon rainy street, image to video slow push-in")
     lines.append("")
     lines.append("请先明确选择视频，再发送文字描述；做图生视频时附上图片。")
     return "\n".join(lines)
@@ -326,7 +346,11 @@ def _active_capabilities(workflows: Sequence[Workflow] | None) -> dict[TaskKind,
 
     active_capabilities: dict[TaskKind, int] = {}
     for workflow in workflows:
-        if not workflow.is_active or workflow.kind in active_capabilities:
+        if (
+            not workflow.is_active
+            or workflow.comfy_workflow_key in RETIRED_WORKFLOW_KEYS
+            or workflow.kind in active_capabilities
+        ):
             continue
         active_capabilities[workflow.kind] = workflow.credit_cost
 

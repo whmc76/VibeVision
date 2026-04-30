@@ -72,6 +72,7 @@ ComfyUI backend service:
 ```
 
 This starts the ComfyUI HTTP backend from `COMFYUI_ROOT` and does not open the ComfyUI browser UI.
+VibeVision builds the ComfyUI command directly from `COMFYUI_ROOT`, `COMFYUI_HOST`, and `COMFYUI_PORT` instead of invoking ComfyUI's bundled startup batch file.
 
 Start or stop the local VibeVision service group:
 

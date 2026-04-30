@@ -69,19 +69,19 @@ class ServiceMonitor:
                 message=f"ComfyUI is already running on port {self.settings.comfyui_port}.",
             )
 
-        root = Path(self.settings.comfyui_root)
-        script = root / self.settings.comfyui_start_script
-        if not root.exists() or not script.exists():
+        command_result = self._comfyui_command()
+        if isinstance(command_result, str):
             return ServiceActionResponse(
                 service=service,
                 action="start",
                 ok=False,
-                message=f"ComfyUI start script not found: {script}",
+                message=command_result,
             )
+        root, command = command_result
 
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         subprocess.Popen(
-            ["cmd.exe", "/c", script.name],
+            command,
             cwd=root,
             creationflags=creationflags,
             stdout=subprocess.DEVNULL,
@@ -148,6 +148,31 @@ class ServiceMonitor:
             ok=started.ok,
             message=started.message,
         )
+
+    def _comfyui_command(self) -> tuple[Path, list[str]] | str:
+        root = Path(self.settings.comfyui_root)
+        if not root.exists():
+            return f"COMFYUI_ROOT does not exist: {root}"
+
+        python_path = root / "python_embeded" / "python.exe"
+        main_path = root / "ComfyUI" / "main.py"
+        if not python_path.exists():
+            return f"ComfyUI embedded Python not found: {python_path}"
+        if not main_path.exists():
+            return f"ComfyUI main.py not found: {main_path}"
+
+        command = [
+            str(python_path),
+            "-s",
+            str(main_path.relative_to(root)),
+            "--windows-standalone-build",
+            "--listen",
+            self.settings.comfyui_host,
+            "--port",
+            str(self.settings.comfyui_port),
+            "--disable-auto-launch",
+        ]
+        return root, command
 
     async def _api_status(self) -> ServiceStatus:
         pid = self._pid_for_port(self.settings.api_port)

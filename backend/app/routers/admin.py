@@ -32,6 +32,7 @@ from app.services.credits import (
     refresh_daily_bonus,
 )
 from app.services.service_monitor import ServiceMonitor
+from app.workflows import RETIRED_WORKFLOW_KEYS
 
 router = APIRouter(prefix="/admin", tags=["admin"])
 
@@ -189,7 +190,13 @@ def list_tasks(
 
 @router.get("/workflows", response_model=list[WorkflowRead])
 def list_workflows(db: Session = Depends(get_db)) -> list[Workflow]:
-    return list(db.scalars(select(Workflow).order_by(Workflow.kind, Workflow.name)))
+    return list(
+        db.scalars(
+            select(Workflow)
+            .where(Workflow.comfy_workflow_key.not_in(RETIRED_WORKFLOW_KEYS))
+            .order_by(Workflow.kind, Workflow.name)
+        )
+    )
 
 
 @router.get("/services", response_model=ServiceOverview)

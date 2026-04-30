@@ -3,8 +3,8 @@ from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from app.db.session import Base
-from app.models import CreditLedgerEntry, LedgerReason, User
-from app.routers.admin import list_users
+from app.models import CreditLedgerEntry, LedgerReason, TaskKind, User, Workflow
+from app.routers.admin import list_users, list_workflows
 from app.seed import (
     HIDDEN_ADMIN_GRANT_AMOUNT,
     HIDDEN_ADMIN_GRANT_NOTE,
@@ -67,6 +67,50 @@ def test_seed_defaults_creates_hidden_admin_and_grants_credits_once() -> None:
 
         assert user.credit_balance == HIDDEN_ADMIN_GRANT_AMOUNT
         assert len(grants) == 1
+
+
+def test_seed_defaults_retires_removed_workflows_and_admin_hides_them() -> None:
+    with build_session() as db:
+        db.add(
+            Workflow(
+                name="SDXL Prompt To Image",
+                kind=TaskKind.image_generate,
+                comfy_workflow_key="sdxl-text-to-image",
+                credit_cost=6,
+                is_active=True,
+                template={"prompt": {"1": {"inputs": {}}}},
+            )
+        )
+        db.add(
+            Workflow(
+                name="Text To Video",
+                kind=TaskKind.video_text_to_video,
+                comfy_workflow_key="text-to-video",
+                credit_cost=10,
+                is_active=True,
+                template={"prompt": {"1": {"inputs": {}}}},
+            )
+        )
+        db.commit()
+
+        seed_defaults(db)
+
+        retired = list(
+            db.scalars(
+                select(Workflow).where(
+                    Workflow.comfy_workflow_key.in_(
+                        {"sdxl-text-to-image", "text-to-video"}
+                    )
+                )
+            )
+        )
+        visible_keys = {workflow.comfy_workflow_key for workflow in list_workflows(db=db)}
+
+        assert retired
+        assert all(workflow.is_active is False for workflow in retired)
+        assert "sdxl-text-to-image" not in visible_keys
+        assert "text-to-video" not in visible_keys
+        assert visible_keys == {"flux2klein-single-edit", "z-image-turbo-text-to-image"}
 
 
 def test_format_exception_details_includes_http_response_body() -> None:

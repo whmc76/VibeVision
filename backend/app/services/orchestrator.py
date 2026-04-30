@@ -1,3 +1,5 @@
+import logging
+import time
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -18,6 +20,8 @@ from app.services.error_details import format_exception_details
 from app.services.intent import IntentService, TargetOutput
 from app.services.users import get_or_create_telegram_user
 
+logger = logging.getLogger(__name__)
+
 
 class WorkflowUnavailableError(ValueError):
     pass
@@ -33,10 +37,16 @@ class GenerationPreflight:
 
 class GenerationOrchestrator:
     def __init__(self, settings: Settings):
+        self.settings = settings
         self.intent = IntentService(settings)
         self.comfyui = ComfyUIClient(settings)
 
     async def handle_bot_message(self, db: Session, payload: BotMessageRequest) -> GenerationTask:
+        task = await self.enqueue_bot_message(db, payload)
+        return await self.execute_queued_task(db, task.id)
+
+    async def enqueue_bot_message(self, db: Session, payload: BotMessageRequest) -> GenerationTask:
+        request_started_at = time.perf_counter()
         user = self._get_or_create_user(db, payload)
         refresh_daily_bonus(db, user)
         workflows = self._list_active_workflows(db)
@@ -59,6 +69,16 @@ class GenerationOrchestrator:
             target_output=target_output,
             source_media_type=source_media_type,
         )
+        logger.info(
+            "generation_precheck_complete telegram_id=%s target=%s source_media=%s workflows=%s elapsed=%.2fs",
+            payload.telegram_id,
+            target_output.value,
+            source_media_type or "none",
+            len(candidate_workflows),
+            time.perf_counter() - request_started_at,
+        )
+
+        stage_started_at = time.perf_counter()
         intent = await self.intent.classify(
             payload.text,
             available_workflows=candidate_workflows,
@@ -66,6 +86,15 @@ class GenerationOrchestrator:
             source_media_url=payload.source_media_url,
             source_media_type=source_media_type,
             target_output=target_output,
+            finalize_prompt=False,
+        )
+        logger.info(
+            "generation_intent_complete telegram_id=%s workflow=%s kind=%s elapsed=%.2fs total=%.2fs",
+            payload.telegram_id,
+            intent.workflow_key,
+            intent.kind.value,
+            time.perf_counter() - stage_started_at,
+            time.perf_counter() - request_started_at,
         )
         workflow = self._select_workflow(candidate_workflows, intent.workflow_key)
         self._ensure_can_afford_workflow(user, workflow)
@@ -91,19 +120,143 @@ class GenerationOrchestrator:
         db.add(task)
         db.commit()
         db.refresh(task)
+        logger.info(
+            "generation_task_reserved task_id=%s workflow=%s cost=%s elapsed=%.2fs",
+            task.id,
+            workflow.comfy_workflow_key,
+            workflow.credit_cost,
+            time.perf_counter() - request_started_at,
+        )
+        return task
 
+    def enqueue_regeneration(self, db: Session, source_task_id: int) -> GenerationTask:
+        source_task = db.get(GenerationTask, source_task_id)
+        if not source_task:
+            raise ValueError(f"Task {source_task_id} not found.")
+        if not source_task.user:
+            raise ValueError(f"Task {source_task_id} has no user.")
+        if not source_task.workflow:
+            raise WorkflowUnavailableError(f"Task {source_task_id} has no workflow.")
+        if not source_task.workflow.is_active:
+            raise WorkflowUnavailableError(
+                f"Workflow {source_task.workflow.comfy_workflow_key} is not active."
+            )
+
+        user = source_task.user
+        workflow = source_task.workflow
+        if self._has_active_regeneration(db, source_task):
+            raise ValueError("同一任务已有重新生成在队列中，请等待当前任务完成后再试。")
+
+        refresh_daily_bonus(db, user)
+        self._ensure_can_afford_workflow(user, workflow)
+
+        prompt = source_task.interpreted_prompt or source_task.original_text
+        task = GenerationTask(
+            user_id=user.id,
+            workflow_id=workflow.id,
+            kind=workflow.kind,
+            status=TaskStatus.queued,
+            original_text=source_task.original_text,
+            interpreted_prompt=prompt,
+            source_media_url=source_task.source_media_url,
+            credit_cost=workflow.credit_cost,
+            telegram_chat_id=source_task.telegram_chat_id,
+            telegram_message_id=source_task.telegram_message_id,
+        )
+        db.add(task)
+        db.flush()
+
+        bonus_used, paid_used = reserve_for_task(db, user, workflow.credit_cost, task_id=task.id)
+        task.bonus_credit_cost = bonus_used
+        task.paid_credit_cost = paid_used
+        db.add(task)
+        db.commit()
+        db.refresh(task)
+        logger.info(
+            "generation_task_regenerated source_task_id=%s task_id=%s workflow=%s cost=%s",
+            source_task_id,
+            task.id,
+            workflow.comfy_workflow_key,
+            workflow.credit_cost,
+        )
+        return task
+
+    def _has_active_regeneration(self, db: Session, source_task: GenerationTask) -> bool:
+        if not source_task.workflow_id:
+            return False
+        existing_id = db.scalar(
+            select(GenerationTask.id)
+            .where(
+                GenerationTask.id != source_task.id,
+                GenerationTask.user_id == source_task.user_id,
+                GenerationTask.workflow_id == source_task.workflow_id,
+                GenerationTask.original_text == source_task.original_text,
+                GenerationTask.source_media_url == source_task.source_media_url,
+                GenerationTask.telegram_chat_id == source_task.telegram_chat_id,
+                GenerationTask.telegram_message_id == source_task.telegram_message_id,
+                GenerationTask.status.in_((TaskStatus.queued, TaskStatus.running)),
+            )
+            .order_by(GenerationTask.id.desc())
+            .limit(1)
+        )
+        return existing_id is not None
+
+    async def execute_queued_task(self, db: Session, task_id: int) -> GenerationTask:
+        request_started_at = time.perf_counter()
+        task = db.get(GenerationTask, task_id)
+        if not task:
+            raise ValueError(f"Task {task_id} not found.")
+        if task.status != TaskStatus.queued:
+            return task
+        if not task.workflow:
+            raise ValueError(f"Task {task_id} has no workflow.")
+        workflow = task.workflow
+
+        stage_started_at = time.perf_counter()
         try:
+            enhanced_prompt = await self.intent.enhance_task_prompt(
+                workflow=workflow,
+                user_text=task.original_text,
+                router_prompt=task.interpreted_prompt,
+                source_media_url=task.source_media_url,
+            )
+            task.interpreted_prompt = enhanced_prompt
+            logger.info(
+                "generation_prompt_prepare_complete task_id=%s workflow=%s elapsed=%.2fs total=%.2fs",
+                task.id,
+                workflow.comfy_workflow_key,
+                time.perf_counter() - stage_started_at,
+                time.perf_counter() - request_started_at,
+            )
+
+            stage_started_at = time.perf_counter()
             task.external_job_id = await self.comfyui.submit_prompt(
                 workflow=workflow,
-                prompt=intent.prompt,
-                source_media_url=payload.source_media_url,
-                parameters=intent.parameters,
+                prompt=task.interpreted_prompt or task.original_text or "",
+                source_media_url=task.source_media_url,
             )
             task.status = TaskStatus.running
         except Exception as exc:
             task.status = TaskStatus.failed
             task.error_message = format_exception_details(exc)
-            refund_task_credits(db, user, task)
+            if task.user:
+                refund_task_credits(db, task.user, task)
+            logger.exception(
+                "generation_comfyui_submit_failed task_id=%s workflow=%s elapsed=%.2fs total=%.2fs",
+                task.id,
+                workflow.comfy_workflow_key,
+                time.perf_counter() - stage_started_at,
+                time.perf_counter() - request_started_at,
+            )
+        else:
+            logger.info(
+                "generation_comfyui_submit_complete task_id=%s workflow=%s prompt_id=%s elapsed=%.2fs total=%.2fs",
+                task.id,
+                workflow.comfy_workflow_key,
+                task.external_job_id,
+                time.perf_counter() - stage_started_at,
+                time.perf_counter() - request_started_at,
+            )
 
         db.add(task)
         db.commit()

@@ -14,6 +14,7 @@ from app.models import (
     Workflow,
 )
 from app.services.credits import adjust_credits
+from app.workflows import RETIRED_WORKFLOW_KEYS
 
 TEMPLATE_DIR = Path(__file__).resolve().parent / "workflow_templates"
 DEMO_TELEGRAM_IDS = ("711820445", "503188902", "913588201")
@@ -55,33 +56,6 @@ DEFAULT_WORKFLOWS = [
         "description": "Edit uploaded images with the Flux2 Klein single-edit workflow.",
         "template": load_template("flux2klein_single_edit_api.json"),
     },
-    {
-        "name": "Image To Video Motion",
-        "kind": TaskKind.video_image_to_video,
-        "comfy_workflow_key": "image-to-video",
-        "credit_cost": 10,
-        "description": "Animate user-provided images into short videos.",
-        "template": {},
-        "is_active": False,
-    },
-    {
-        "name": "Text To Video",
-        "kind": TaskKind.video_text_to_video,
-        "comfy_workflow_key": "text-to-video",
-        "credit_cost": 10,
-        "description": "Generate short videos from text prompts.",
-        "template": {},
-        "is_active": False,
-    },
-    {
-        "name": "Image Understanding Prompt Writer",
-        "kind": TaskKind.prompt_expand,
-        "comfy_workflow_key": "prompt-expand",
-        "credit_cost": 2,
-        "description": "Understand media and expand user intent into generation prompts.",
-        "template": {},
-        "is_active": False,
-    },
 ]
 
 
@@ -109,18 +83,18 @@ def seed_defaults(db: Session) -> None:
         db.add(exists)
 
     db.flush()
-    legacy_edit_workflow = db.scalar(
-        select(Workflow).where(Workflow.comfy_workflow_key == "image-edit-inpaint")
+    retired_workflows = list(
+        db.scalars(
+            select(Workflow).where(
+                Workflow.comfy_workflow_key.in_(
+                    RETIRED_WORKFLOW_KEYS | {"image-edit-inpaint"}
+                )
+            )
+        )
     )
-    if legacy_edit_workflow:
-        legacy_edit_workflow.is_active = False
-        db.add(legacy_edit_workflow)
-    legacy_text_to_image_workflow = db.scalar(
-        select(Workflow).where(Workflow.comfy_workflow_key == "sdxl-text-to-image")
-    )
-    if legacy_text_to_image_workflow:
-        legacy_text_to_image_workflow.is_active = False
-        db.add(legacy_text_to_image_workflow)
+    for workflow in retired_workflows:
+        workflow.is_active = False
+        db.add(workflow)
     db.flush()
 
     purge_demo_data(db)

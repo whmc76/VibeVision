@@ -37,22 +37,26 @@ if (-not $env:COMFYUI_ROOT) {
 }
 
 $Port = [int]$env:COMFYUI_PORT
+$HostAddress = if ($env:COMFYUI_HOST) { $env:COMFYUI_HOST } else { "127.0.0.1" }
 $Existing = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue
 if ($Existing) {
   Write-Host "ComfyUI is already listening on port $Port."
   return
 }
 
-$ScriptName = if ($env:COMFYUI_START_SCRIPT) { $env:COMFYUI_START_SCRIPT } else { "run_nvidia_gpu.bat" }
-$ScriptPath = Join-Path $env:COMFYUI_ROOT $ScriptName
-if (-not (Test-Path -LiteralPath $ScriptPath)) {
-  throw "ComfyUI start script not found: $ScriptPath"
+$PythonPath = Join-Path $env:COMFYUI_ROOT "python_embeded\python.exe"
+$MainPath = Join-Path $env:COMFYUI_ROOT "ComfyUI\main.py"
+if (-not (Test-Path -LiteralPath $PythonPath)) {
+  throw "ComfyUI embedded Python not found: $PythonPath"
+}
+if (-not (Test-Path -LiteralPath $MainPath)) {
+  throw "ComfyUI main.py not found: $MainPath"
 }
 
 Write-Host "Starting ComfyUI backend service on port $Port. This can take a while."
 Start-Process `
-  -FilePath "cmd.exe" `
-  -ArgumentList @("/c", $ScriptName) `
+  -FilePath $PythonPath `
+  -ArgumentList @("-s", "ComfyUI\main.py", "--windows-standalone-build", "--listen", $HostAddress, "--port", "$Port", "--disable-auto-launch") `
   -WorkingDirectory $env:COMFYUI_ROOT `
   -WindowStyle Hidden
 

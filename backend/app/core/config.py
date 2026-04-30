@@ -57,6 +57,7 @@ class Settings(BaseSettings):
     telegram_update_queue_maxlen: int = 100_000
     telegram_update_queue_block_ms: int = 5_000
     telegram_duplicate_message_window_seconds: int = 45
+    telegram_regenerate_cooldown_seconds: int = 45
     comfyui_poll_interval_seconds: int = 3
     comfyui_poll_timeout_seconds: int = 600
 
