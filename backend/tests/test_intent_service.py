@@ -362,6 +362,38 @@ def test_logic_and_prompt_providers_can_be_split(monkeypatch) -> None:
     assert calls == ["minimax-logic", "ollama-prompt"]
 
 
+def test_enhance_task_prompt_passes_source_image_context(monkeypatch) -> None:
+    service = build_service()
+    workflow = build_workflows()[1]
+
+    async def fake_load_visual_inputs(**kwargs) -> tuple[list[str], str]:
+        assert kwargs["source_media_url"] == "https://example.test/source.png"
+        assert kwargs["source_media_type"] == "image"
+        assert kwargs["user_text"] == "改图，换成电影感灯光"
+        return [], "A person seated indoors, waist-up composition, warm room lighting."
+
+    async def fake_enhance_prompt_with_llm(**kwargs) -> str:
+        assert kwargs["vision_context"] == (
+            "A person seated indoors, waist-up composition, warm room lighting."
+        )
+        return "cinematic lighting edit grounded in the source image"
+
+    monkeypatch.setattr(service, "_load_visual_inputs", fake_load_visual_inputs)
+    monkeypatch.setattr(service, "_enhance_prompt_with_llm", fake_enhance_prompt_with_llm)
+
+    result = asyncio.run(
+        service.enhance_task_prompt(
+            workflow=workflow,
+            user_text="改图，换成电影感灯光",
+            router_prompt="apply cinematic lighting",
+            source_media_url="https://example.test/source.png",
+            source_media_type="image",
+        )
+    )
+
+    assert result == "cinematic lighting edit grounded in the source image"
+
+
 def test_router_prompt_includes_vision_context() -> None:
     service = build_service()
     route = service._build_workflow_routes(build_workflows())[0]

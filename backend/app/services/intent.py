@@ -182,15 +182,28 @@ class IntentService:
         route = self._route_for_workflow(workflow)
         if not route:
             return self._clean_prompt_text(router_prompt) or self._clean_prompt_text(user_text)
+        clean_user_text = self._clean_prompt_text(user_text)
+        clean_router_prompt = self._clean_prompt_text(router_prompt)
+        normalized_media_type = self.normalize_media_type(source_media_type) or (
+            "image" if source_media_url else None
+        )
+        media_attached = bool(source_media_url)
+        images: list[str] = []
+        vision_context = ""
+        if media_attached:
+            images, vision_context = await self._load_visual_inputs(
+                source_media_url=source_media_url,
+                source_media_type=normalized_media_type,
+                user_text=clean_user_text,
+            )
         return await self._finalize_prompt(
             workflow=route,
-            user_text=self._clean_prompt_text(user_text),
-            router_prompt=self._clean_prompt_text(router_prompt),
-            media_attached=bool(source_media_url),
-            source_media_type=self.normalize_media_type(source_media_type)
-            or ("image" if source_media_url else None),
-            images=[],
-            vision_context="",
+            user_text=clean_user_text,
+            router_prompt=clean_router_prompt,
+            media_attached=media_attached,
+            source_media_type=normalized_media_type,
+            images=images,
+            vision_context=vision_context,
         )
 
     def resolve_target_output(
@@ -772,21 +785,23 @@ class IntentService:
     def _prompt_enhancement_system_prompt(self) -> str:
         return (
             "You are VibeVision's controlled prompt enhancement model. Rewrite the user's request "
-            "into a concise production prompt for the selected generation workflow.\n"
+            "into a vivid, faithful production prompt for the selected generation workflow.\n"
             "Rules:\n"
-            "1. Make only necessary, appropriate expansion. Do not turn a simple edit into a new "
-            "scene concept.\n"
-            "2. Output one compact sentence, or two short sentences if needed. Keep it under "
-            "70 English words or 240 Chinese characters.\n"
-            "3. If source media is attached, use only key visible facts from the image: subject, "
-            "pose/composition, and existing environment. Preserve identity, pose, framing, "
-            "background, and lighting unless the user explicitly asks to change them.\n"
-            "4. For image editing, combine the user's requested change with 2-4 essential source "
-            "image details. Do not list every detail. Do not add new locations, props, styles, "
-            "camera moves, moods, or lighting unless requested.\n"
-            "5. If workflow_note says English is required, write the final prompt in English even "
+            "1. Enrich the prompt with concrete visual details, composition, atmosphere, material, "
+            "lighting, camera, and quality cues that naturally support the user's request.\n"
+            "2. Reasonable creative associations are allowed, but they must not replace, contradict, "
+            "or overshadow the user's requested subject, action, style, or edit.\n"
+            "3. If source media is attached, treat vision_context as visual grounding. Blend the "
+            "most useful image facts into the prompt so the result reflects the source subject, "
+            "pose/composition, environment, and visible style while applying the user's request.\n"
+            "4. For image editing, combine the requested change with important source-image details. "
+            "Keep the instruction specific enough for generation, but do not drift into a different "
+            "scene concept unless the user asks for that transformation.\n"
+            "5. Output one polished prompt, preferably one or two rich sentences. Keep it under "
+            "110 English words or 360 Chinese characters.\n"
+            "6. If workflow_note says English is required, write the final prompt in English even "
             "when the user request is in another language.\n"
-            "6. Return only the final prompt text. No bullets, no JSON, no explanation, no thinking tags."
+            "7. Return only the final prompt text. No bullets, no JSON, no explanation, no thinking tags."
         )
 
     def _prompt_enhancement_user_prompt(
