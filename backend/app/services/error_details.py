@@ -38,7 +38,7 @@ def append_error_detail(
     detail: str | None,
     *,
     label: str = "Details",
-    task_id: int | None = None,
+    task_id: str | None = None,
 ) -> str:
     clean_detail = _clean_text(detail or "")
     detail_parts: list[str] = []
@@ -69,7 +69,7 @@ def _clean_text(value: str) -> str:
     return " ".join(value.split())[:MAX_DETAIL_CHARS].strip()
 
 
-def _task_id_detail(task_id: int, label: str) -> str:
+def _task_id_detail(task_id: str, label: str) -> str:
     return f"任务 ID: {task_id}" if label == "详细信息" else f"Task ID: {task_id}"
 
 

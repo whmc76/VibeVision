@@ -120,12 +120,13 @@ class TaskQueueWorker:
             reply_to_message_id = task.telegram_message_id
             kind = task.kind
             error_message = task.error_message
+            public_task_id = task.public_id
 
         if status == TaskStatus.failed or not prompt_id:
             if chat_id:
                 await self.telegram.send_message(
                     chat_id,
-                    f"任务 #{task_id} 执行失败，积分已退回。{error_message or ''}".strip(),
+                    f"任务 #{public_task_id} 执行失败，积分已退回。{error_message or ''}".strip(),
                     reply_to_message_id,
                 )
             return

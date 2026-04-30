@@ -395,7 +395,7 @@ async def process_telegram_update(update: dict, settings: Settings) -> None:
         )
 
         status = task.status
-        created_task_id = task.id
+        created_task_id = task.public_id
         kind = task.kind
         credit_cost = task.credit_cost
         error_message = task.error_message
@@ -471,6 +471,7 @@ async def _complete_comfyui_task_locked(
             task = _get_task(db, task_id)
             task.status = TaskStatus.failed
             task.error_message = detail
+            public_task_id = task.public_id
             if task.user:
                 refund_task_credits(db, task.user, task)
             db.add(task)
@@ -481,7 +482,7 @@ async def _complete_comfyui_task_locked(
                 "生成任务失败，积分已退回。请检查 ComfyUI 返回结果和节点输出。",
                 detail,
                 label="详细信息",
-                task_id=task_id,
+                task_id=public_task_id,
             ),
             reply_to_message_id,
         )
@@ -518,9 +519,10 @@ async def _complete_task_success(
         task.status = TaskStatus.completed
         task.result_urls = result_urls
         include_prompt = bool(task.user and task.user.is_admin)
+        public_task_id = task.public_id
         result_caption = build_result_caption(
             task.interpreted_prompt or task.original_text,
-            task_id=task_id,
+            task_id=public_task_id,
             include_prompt=include_prompt,
         )
         db.add(task)
@@ -533,7 +535,7 @@ async def _complete_task_success(
             kind,
             reply_to_message_id,
             caption=result_caption,
-            reply_markup=build_regenerate_result_markup(task_id),
+            reply_markup=build_regenerate_result_markup(public_task_id),
         )
     except Exception as exc:
         await telegram.send_message(
@@ -542,7 +544,7 @@ async def _complete_task_success(
                 "任务已完成，但结果回传到 Telegram 失败。管理员可在后台查看任务输出。",
                 format_exception_details(exc),
                 label="详细信息",
-                task_id=task_id,
+                task_id=public_task_id,
             ),
             reply_to_message_id,
         )
@@ -557,10 +559,8 @@ async def _process_regenerate_callback(
         await telegram.answer_callback_query(callback_query.callback_query_id)
         return
 
-    raw_task_id = callback_query.data.removeprefix(REGENERATE_CALLBACK_PREFIX)
-    try:
-        source_task_id = int(raw_task_id)
-    except ValueError:
+    source_task_id = callback_query.data.removeprefix(REGENERATE_CALLBACK_PREFIX).strip()
+    if not source_task_id:
         await telegram.answer_callback_query(callback_query.callback_query_id, "无效的任务。")
         return
 
@@ -579,7 +579,9 @@ async def _process_regenerate_callback(
 
     orchestrator = GenerationOrchestrator(settings)
     with SessionLocal() as db:
-        source_task = db.get(GenerationTask, source_task_id)
+        source_task = db.scalar(
+            select(GenerationTask).where(GenerationTask.public_id == source_task_id)
+        )
         if not source_task:
             await telegram.answer_callback_query(callback_query.callback_query_id, "任务不存在。")
             return
@@ -588,7 +590,7 @@ async def _process_regenerate_callback(
             return
 
         try:
-            task = orchestrator.enqueue_regeneration(db, source_task_id)
+            task = orchestrator.enqueue_regeneration(db, source_task.id)
         except InsufficientCreditsError as exc:
             await telegram.answer_callback_query(callback_query.callback_query_id, str(exc))
             return
@@ -608,14 +610,14 @@ async def _process_regenerate_callback(
             )
             return
 
-        task_id = task.id
+        public_task_id = task.public_id
         kind = task.kind
         credit_cost = task.credit_cost
 
     await telegram.answer_callback_query(callback_query.callback_query_id, "已重新加入队列。")
     await telegram.send_message(
         callback_query.chat_id,
-        f"{_task_kind_label(kind)}已重新加入队列，任务 #{task_id}，实际消耗 {credit_cost} 积分。完成后会自动回传结果。",
+        f"{_task_kind_label(kind)}已重新加入队列，任务 #{public_task_id}，实际消耗 {credit_cost} 积分。完成后会自动回传结果。",
         callback_query.message_id,
     )
 
@@ -1217,7 +1219,7 @@ return is_duplicate
 
 async def _is_duplicate_regeneration_request(
     callback_query: TelegramCallbackQuery,
-    source_task_id: int,
+    source_task_id: str,
     settings: Settings,
 ) -> bool:
     cooldown_seconds = max(0, settings.telegram_regenerate_cooldown_seconds)
@@ -1259,7 +1261,7 @@ async def _is_duplicate_regeneration_request(
 
 async def _is_redis_duplicate_regeneration_request(
     callback_query: TelegramCallbackQuery,
-    source_task_id: int,
+    source_task_id: str,
     fingerprint: str,
     settings: Settings,
 ) -> bool:
@@ -1292,7 +1294,7 @@ return 0
 
 def _regeneration_key(
     callback_query: TelegramCallbackQuery,
-    source_task_id: int,
+    source_task_id: str,
 ) -> tuple[str, str, str]:
     return callback_query.chat_id, callback_query.telegram_id, str(source_task_id)
 

@@ -21,7 +21,7 @@ def build_remove_keyboard_markup() -> dict[str, bool]:
     return {"remove_keyboard": True}
 
 
-def build_regenerate_result_markup(task_id: int) -> dict[str, list[list[dict[str, str]]]]:
+def build_regenerate_result_markup(task_id: str) -> dict[str, list[list[dict[str, str]]]]:
     return {
         "inline_keyboard": [
             [
@@ -90,7 +90,7 @@ MAX_RESULT_CAPTION_CHARS = 1_024
 
 def build_result_caption(
     prompt: str | None,
-    task_id: int | None = None,
+    task_id: str | None = None,
     *,
     include_prompt: bool = False,
 ) -> str:

@@ -55,9 +55,10 @@ async def recover_task(task_id: int, settings: Settings) -> None:
         chat_id = task.telegram_chat_id
         reply_to_message_id = task.telegram_message_id
         include_prompt = bool(task.user and task.user.is_admin)
+        public_task_id = task.public_id
         result_caption = build_result_caption(
             task.interpreted_prompt or task.original_text,
-            task_id=task.id,
+            task_id=public_task_id,
             include_prompt=include_prompt,
         )
 
@@ -95,6 +96,7 @@ async def _retry_task(task_id: int, settings: Settings) -> None:
         chat_id = task.telegram_chat_id
         reply_to_message_id = task.telegram_message_id
         kind = task.kind
+        public_task_id = task.public_id
 
     async with comfyui_gpu_scope(settings):
         async with concurrency_slot("comfyui", settings.comfyui_max_concurrency):
@@ -110,6 +112,7 @@ async def _retry_task(task_id: int, settings: Settings) -> None:
                     task = _get_task(db, task_id)
                     task.status = TaskStatus.failed
                     task.error_message = detail
+                    public_task_id = task.public_id
                     if task.user:
                         refund_task_credits(db, task.user, task)
                     db.add(task)
@@ -132,7 +135,7 @@ async def _retry_task(task_id: int, settings: Settings) -> None:
             if chat_id:
                 await TelegramClient(settings).send_message(
                     chat_id,
-                    f"任务 #{task_id} 未交付，已自动重试，不会重复扣积分。",
+                    f"任务 #{public_task_id} 未交付，已自动重试，不会重复扣积分。",
                     reply_to_message_id,
                 )
 

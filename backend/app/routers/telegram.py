@@ -31,7 +31,7 @@ async def submit_bot_message(
         raise HTTPException(status_code=402, detail=str(exc)) from exc
 
     return BotMessageResponse(
-        task_id=task.id,
+        task_id=task.public_id,
         status=task.status,
         kind=task.kind,
         credit_cost=task.credit_cost,
@@ -42,7 +42,7 @@ async def submit_bot_message(
             else append_error_detail(
                 "Task created but queueing failed.",
                 task.error_message,
-                task_id=task.id,
+                task_id=task.public_id,
             )
         ),
     )

@@ -30,7 +30,7 @@ export interface User {
 }
 
 export interface GenerationTask {
-  id: number;
+  id: string;
   user_id: number;
   workflow_id: number | null;
   kind: TaskKind;

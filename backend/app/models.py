@@ -1,10 +1,15 @@
 from datetime import date, datetime
 from enum import StrEnum
+from secrets import token_hex
 
 from sqlalchemy import JSON, Date, DateTime, Enum, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.db.session import Base
+
+
+def generate_task_public_id() -> str:
+    return token_hex(6)
 
 
 class UserStatus(StrEnum):
@@ -96,6 +101,12 @@ class GenerationTask(Base):
     __tablename__ = "generation_tasks"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    public_id: Mapped[str] = mapped_column(
+        String(24),
+        default=generate_task_public_id,
+        unique=True,
+        index=True,
+    )
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     workflow_id: Mapped[int | None] = mapped_column(ForeignKey("workflows.id"), nullable=True)
     kind: Mapped[TaskKind] = mapped_column(Enum(TaskKind), index=True)

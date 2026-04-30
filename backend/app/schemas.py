@@ -69,7 +69,7 @@ class WorkflowRead(BaseModel):
 
 
 class GenerationTaskRead(BaseModel):
-    id: int
+    id: str = Field(validation_alias="public_id")
     user_id: int
     workflow_id: int | None
     kind: TaskKind
@@ -88,7 +88,7 @@ class GenerationTaskRead(BaseModel):
     created_at: datetime
     updated_at: datetime
 
-    model_config = ConfigDict(from_attributes=True)
+    model_config = ConfigDict(from_attributes=True, populate_by_name=True)
 
 
 class BotMessageRequest(BaseModel):
@@ -104,7 +104,7 @@ class BotMessageRequest(BaseModel):
 
 
 class BotMessageResponse(BaseModel):
-    task_id: int
+    task_id: str
     status: TaskStatus
     kind: TaskKind
     credit_cost: int

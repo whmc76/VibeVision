@@ -230,13 +230,13 @@ def test_regeneration_callback_is_rate_limited_per_source_task() -> None:
         await _clear_pending_followup_state_for_tests()
         settings = Settings(telegram_regenerate_cooldown_seconds=45)
 
-        first = _callback_query(callback_query_id="callback-1", source_task_id=46)
-        second = _callback_query(callback_query_id="callback-2", source_task_id=46)
-        other_source = _callback_query(callback_query_id="callback-3", source_task_id=47)
+        first = _callback_query(callback_query_id="callback-1", source_task_id="task-a")
+        second = _callback_query(callback_query_id="callback-2", source_task_id="task-a")
+        other_source = _callback_query(callback_query_id="callback-3", source_task_id="task-b")
 
-        assert await _is_duplicate_regeneration_request(first, 46, settings) is False
-        assert await _is_duplicate_regeneration_request(second, 46, settings) is True
-        assert await _is_duplicate_regeneration_request(other_source, 47, settings) is False
+        assert await _is_duplicate_regeneration_request(first, "task-a", settings) is False
+        assert await _is_duplicate_regeneration_request(second, "task-a", settings) is True
+        assert await _is_duplicate_regeneration_request(other_source, "task-b", settings) is False
 
     asyncio.run(scenario())
 
@@ -343,6 +343,7 @@ def test_complete_task_success_does_not_use_detached_task_id(monkeypatch) -> Non
         db.add(task)
         db.commit()
         task_id = task.id
+        public_task_id = task.public_id
 
     class FakeTelegram:
         def __init__(self) -> None:
@@ -380,8 +381,8 @@ def test_complete_task_success_does_not_use_detached_task_id(monkeypatch) -> Non
     )
 
     assert telegram.reply_markup is not None
-    assert str(task_id) in str(telegram.reply_markup)
-    assert telegram.caption == f"生成结果\n任务 ID: {task_id}"
+    assert public_task_id in str(telegram.reply_markup)
+    assert telegram.caption == f"生成结果\n任务 ID: {public_task_id}"
 
 
 def test_complete_task_success_includes_prompt_for_admin_user(monkeypatch) -> None:
@@ -419,6 +420,7 @@ def test_complete_task_success_includes_prompt_for_admin_user(monkeypatch) -> No
         db.add(task)
         db.commit()
         task_id = task.id
+        public_task_id = task.public_id
 
     class FakeTelegram:
         def __init__(self) -> None:
@@ -454,7 +456,7 @@ def test_complete_task_success_includes_prompt_for_admin_user(monkeypatch) -> No
     )
 
     assert telegram.caption == (
-        f"生成结果\n任务 ID: {task_id}\n提示词: change the background to a beach"
+        f"生成结果\n任务 ID: {public_task_id}\n提示词: change the background to a beach"
     )
 
 
@@ -479,7 +481,7 @@ def _inbound_message(
 def _callback_query(
     *,
     callback_query_id: str,
-    source_task_id: int,
+    source_task_id: str,
 ) -> TelegramCallbackQuery:
     return TelegramCallbackQuery(
         callback_query_id=callback_query_id,

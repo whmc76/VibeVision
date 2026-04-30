@@ -1,4 +1,5 @@
 from collections.abc import Generator
+from secrets import token_hex
 
 from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
@@ -50,6 +51,7 @@ def _ensure_sqlite_columns() -> None:
     existing_tables = set(inspector.get_table_names())
     required_columns_by_table = {
         "generation_tasks": {
+            "public_id": "VARCHAR(24)",
             "telegram_chat_id": "VARCHAR(64)",
             "telegram_message_id": "VARCHAR(64)",
             "bonus_credit_cost": "INTEGER NOT NULL DEFAULT 0",
@@ -77,3 +79,27 @@ def _ensure_sqlite_columns() -> None:
                     connection.execute(
                         text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {column_type}")
                     )
+        if "generation_tasks" in existing_tables:
+            used_public_ids = {
+                row[0]
+                for row in connection.execute(
+                    text("SELECT public_id FROM generation_tasks WHERE public_id IS NOT NULL")
+                )
+            }
+            for (task_id,) in connection.execute(
+                text("SELECT id FROM generation_tasks WHERE public_id IS NULL")
+            ):
+                public_id = token_hex(6)
+                while public_id in used_public_ids:
+                    public_id = token_hex(6)
+                used_public_ids.add(public_id)
+                connection.execute(
+                    text("UPDATE generation_tasks SET public_id = :public_id WHERE id = :id"),
+                    {"public_id": public_id, "id": task_id},
+                )
+            connection.execute(
+                text(
+                    "CREATE UNIQUE INDEX IF NOT EXISTS ix_generation_tasks_public_id "
+                    "ON generation_tasks (public_id)"
+                )
+            )
